@@ -13,7 +13,7 @@ public class SendHost {
     private String fileName;
     private int mtu;
     private int sws;
-    private int prev_ack; // this is the last reciveved acc
+    private int prev_ack; // this is the last received acc
     private int next_seq_num; // this is the next sequence number that we are going to send
     private int curr_seq_num; // this is the current sequence number we are on,
     private int next_ack_num; // this is the next byte we expect from the sender
@@ -61,7 +61,7 @@ public class SendHost {
         this.prev_ack = -1; // the first ack is always 0
         this.next_seq_num = 0;
         this.curr_seq_num = 0;
-        this.next_ack_num = 0; // this is what we expect back when reciving data back
+        this.next_ack_num = 0; // this is what we expect back when receiving data back
         this.foundHost = false;
         this.slidingWindowSize = sws;
         this.dataSegmentSize = mtu - 24; // this is the maximum amount of data we can send across the network at a time
@@ -81,7 +81,7 @@ public class SendHost {
         this.num_packets_sent = 0; 
         this.amountDataSent = 0; 
 
-        // first thing that needs to be done is a socketopened
+        // first thing that needs to be done is a socket opened
         try {
             this.server_socket = new DatagramSocket(this.port);
 
@@ -101,16 +101,16 @@ public class SendHost {
         reciever_thread.start();
         sender_thread.start();
 
-        // now we need to send out the first part of the three way handshake
+        // now we need to send out the first part of the three-way handshake
         // need to build up the packet
         // we need the 29th bit to be a 1 because this will be a SYN
 
         // there is no data in the first packet
 
-        // in binary we will represent all three flags as 7
+        // in binary, we will represent all three flags as 7
         // just
 
-        synchronized (lock) { // we cannot let other threads exectute while this is happening
+        synchronized (lock) { // we cannot let other threads execute while this is happening
 
             byte[] data = buildPacket(new byte[0], 4, 0);
 
@@ -133,6 +133,7 @@ public class SendHost {
                 System.exit(-1);
             }
             // send the packet
+
 
             // add to hashmap
             packets.put(next_seq_num, data);
@@ -168,12 +169,12 @@ public class SendHost {
 
     public byte[] buildPacket(byte[] data, int flags, int sequenceNumber) {
 
-        // the first 4 bytes are the sequence numbrer
+        // the first 4 bytes are the sequence number
         byte[] sequenceNumberBytes = new byte[4];
         ByteBuffer buffer = ByteBuffer.wrap(sequenceNumberBytes);
         buffer.putInt(sequenceNumber);
 
-        // the next 4 bytes are the current ack intially 0
+        // the next 4 bytes are the current ack initially 0
         byte[] currentAckBytes = new byte[4];
         ByteBuffer buffer2 = ByteBuffer.wrap(currentAckBytes);
         buffer2.putInt(this.next_ack_num);
