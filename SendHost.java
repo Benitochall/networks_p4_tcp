@@ -2,6 +2,7 @@ import java.net.*;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.io.*;
+import java.util.*;
 
 public class SendHost {
 
@@ -18,6 +19,10 @@ public class SendHost {
     private int next_ack_num; // this is the next byte we expect from the sender
     private boolean foundHost;
     private int slidingWindowSize;
+    private boolean instantiateFIN;
+    private boolean sentFin;
+    private boolean isRetrasnmitting;
+
 
     private DatagramSocket server_socket;
     private InetAddress name_dst_ip;
@@ -28,8 +33,21 @@ public class SendHost {
 
     private int dataSegmentSize;
     private int num_incorrect_checksums;
+    private int num_packets_sent; 
+    private int totalRetransmissions;
+    private int amountDataSent;
+    private int num_duplicate_acks;
+
+    private long ERTT;
+    private long EDEV;
 
     private long timeout = 5L * 1_000_000_000L;
+
+    private HashMap<Integer, byte[]> packets; // everytime we send a packet we need to have it
+    private HashMap<Integer, Timer> timers;
+    private HashMap<Integer, TCPState> stateus;
+    private ArrayList<Integer> SequenceNumbers;
+    private ArrayList<Integer> DuplicateAcks;
 
     // this is the host that will send data
     public SendHost(int port, String destIP, int destinationPort, String fileName, int mtu, int sws) {
@@ -49,6 +67,19 @@ public class SendHost {
         this.dataSegmentSize = mtu - 24; // this is the maximum amount of data we can send across the network at a time
         // this is because we need space for header
         this.lastPacket = false;
+        packets = new HashMap<>();
+        timers = new HashMap<>();
+        stateus = new HashMap<>();
+        SequenceNumbers = new ArrayList<>();
+        DuplicateAcks = new ArrayList<>();
+        this.ERTT = 0;
+        this.EDEV = 0;
+        instantiateFIN = false;
+        this.sentFin = false;
+        this.isRetrasnmitting = false;
+        this.totalRetransmissions = 0; 
+        this.num_packets_sent = 0; 
+        this.amountDataSent = 0; 
 
         // first thing that needs to be done is a socket opened
         try {
@@ -103,13 +134,36 @@ public class SendHost {
             }
             // send the packet
 
-            // now we need to update the next_sequence number because it should be 1
+
+            // add to hashmap
+            packets.put(next_seq_num, data);
+            SequenceNumbers.add(next_seq_num);
+            // start timer
+            startTimer(next_seq_num);
+            // add status
+            stateus.put(next_seq_num, new TCPState(prev_ack, next_seq_num, curr_seq_num, next_ack_num));
+            printPacket(data, false);
+
+            // now we need to update the next_sequence number becasue it should be 1
             next_seq_num++; // increments by 1
+            num_packets_sent++; 
 
             // ok we just sent a packet with a sequence number of 0 and a current ack of 0
             // the next ack should come back as 1
-
         }
+
+        try {
+
+            reciever_thread.join();
+            sender_thread.join();
+        }
+
+        catch (InterruptedException e) {
+            System.out.println("Threads interupted");
+            System.exit(-1);
+        }
+        // now print out summary info
+        printSummary(); 
 
     }
 
@@ -217,6 +271,24 @@ public class SendHost {
         return checksum;
     }
 
+    public void recalculateTimeout(int S, long start_time) {
+        long SRTT;
+        long SDEV;
+
+        if (S == 0) {
+            ERTT = System.nanoTime() - start_time;
+            EDEV = 0;
+            timeout = 2 * ERTT;
+        } else {
+            SRTT = System.nanoTime() - start_time;
+            SDEV = Math.abs(SRTT - ERTT);
+            ERTT = (long) 0.875 * ERTT + (long) (1 - 0.875) * SRTT;
+            EDEV = (long) 0.75 * EDEV + (long) (1 - 0.75) * SDEV;
+            timeout = ERTT + 4 * EDEV;
+        }
+
+    }
+
     public int pullAck(byte[] packet) {
 
         ByteBuffer buffer = ByteBuffer.wrap(packet);
@@ -283,9 +355,15 @@ public class SendHost {
 
     }
 
+    public long pullTime(byte[] packet) {
+        ByteBuffer buffer = ByteBuffer.wrap(packet);
+        buffer.position(8);
+        return buffer.getLong();
+    }
+
     public void updateVarsRec(byte[] packet, boolean isData) {
         // so if the data message that comes in has data
-        int packet_seq_num = pullSeqNum(packet); // gets the sequence number out of the packet
+        int packet_seq_num = pullSeqNum(packet); // gets the sequence number out of the packet // 0
         int length = pullLength(packet);
         int actualLength = length >> 3;
 
@@ -312,10 +390,12 @@ public class SendHost {
         if (((length >> 1) & 1) == 1) { // FIN bit
             // now we have ended the connection after reciveing a fin back
             foundHost = false;
+            instantiateFIN = true;
 
         }
         if ((length & 1) == 1) { // ACK bit
             // TODO
+            prev_ack = pullAck(packet) - 1;
 
         }
 
@@ -342,6 +422,134 @@ public class SendHost {
         return checksum == calculatedChecksum;
     }
 
+    private void resetState(int seqNum) {
+        TCPState old_state = stateus.get(seqNum);
+        prev_ack = old_state.getTCPState_prev_ack();
+        next_seq_num = old_state.getTCPState_next_seq_num();
+        curr_seq_num = old_state.getTCPState_curr_seq_num();
+        next_ack_num = old_state.getTCPState_next_ack_num();
+        isRetrasnmitting = true;
+
+    }
+
+    public void printPacket(byte[] packet, boolean receive) {
+        StringBuilder sb = new StringBuilder();
+        if (receive) {
+            sb.append("rcv");
+        } else {
+            sb.append("snd");
+        }
+
+        sb.append(" " + System.nanoTime());
+
+        int length = pullLength(packet);
+        if (((length >> 2) & 1) == 1) { // SYN
+            sb.append("S");
+
+        } else {
+            sb.append("-");
+        }
+
+        if ((length & 1) == 1) { // ACK bit
+            sb.append("A");
+
+        } else {
+            sb.append("-");
+
+        }
+
+        if (((length >> 1) & 1) == 1) { // FIN
+            sb.append("F");
+
+        } else {
+            sb.append("-");
+        }
+
+        sb.append(" ");
+        if (length > 0) {
+            sb.append("D");
+        } else {
+            sb.append("-");
+        }
+
+        int seqNum = pullSeqNum(packet);
+        sb.append(" " + seqNum);
+
+        sb.append(" " + length);
+
+        int ackNum = pullAck(packet);
+        sb.append(" " + ackNum);
+
+        System.out.println(sb.toString());
+    }
+
+    private void startTimer(int seqNum) {
+        long timeoutTime = System.nanoTime() + timeout;
+        Timer timer = new Timer();
+        timer.schedule(new TimerTask() {
+            @Override
+            public void run() {
+                cancelTimer(seqNum); // remove the sequence number
+                // TODO: implement go back N here, need to restore program to the state it was
+                // at
+
+                // need to restore the instance variables to the current packet
+                // TCPState old_state = stateus.get(seqNum);
+                // prev_ack = old_state.getTCPState_prev_ack();
+                // next_seq_num = old_state.getTCPState_next_seq_num();
+                // curr_seq_num = old_state.getTCPState_curr_seq_num();
+                // next_ack_num = old_state.getTCPState_next_ack_num();
+
+                // now jump into a while loop sending all the packets
+
+                // need to sort packets by sequence number.
+                // send all packet between current ack and largest sequenc number in packet
+                // hashmap
+
+                // jump into while
+                // check sliding window
+                // cancel old timer
+                // send packet
+                // add packet to loop
+                // start timer
+                // End of while
+                // send packets in while loop until we have caught up
+                resetState(seqNum);
+
+            }
+        }, timeoutTime);
+        timers.put(seqNum, timer);
+    }
+
+    private void cancelTimer(int seqNum) { // TODO: cancel timer everytime there is an ack
+        Timer timer = timers.get(seqNum);
+        if (timer != null) {
+            timer.cancel();
+            timers.remove(seqNum);
+        }
+    }
+
+    public void printSummary(){
+       // Amount of Data transferred/received
+        System.out.println("Amount of Data transferred/received: " + amountDataSent + " bytes");
+
+        // Number of packets sent/received
+        System.out.println("Number of packets sent: " + num_packets_sent );
+
+        // Number of out-of-sequence packets discarded
+        System.out.println("Number of out-of-sequence packets discarded: "); //TODO
+
+        // Number of packets discarded due to incorrect checksum
+        System.out.println("Number of packets discarded due to incorrect checksum: " + num_incorrect_checksums);
+
+        // Number of retransmissions
+        System.out.println("Number of retransmissions: " + totalRetransmissions);
+
+        // Number of duplicate acknowledgements
+        System.out.println("Number of duplicate acknowledgements: " + num_duplicate_acks);
+
+    }
+
     public class SendThread extends Thread {
 
         @Override
@@ -352,88 +560,129 @@ public class SendHost {
                 FileInputStream fileReader = new FileInputStream(new File(fileName));
 
                 // we con only send a message of the size of the window
-                byte[] sendDataBytes = new byte[slidingWindowSize];
+                while (!instantiateFIN) {
+                    byte[] sendDataBytes = new byte[slidingWindowSize];
 
-                if (foundHost) { // we have recived a message from the host
+                    if (foundHost && !lastPacket) { // we have recived a message from the host
 
-                    // need to check the size of the sliding window
-                    // the end of the sliding window prev_ack +
-                    if (next_seq_num + dataSegmentSize < prev_ack + slidingWindowSize + 1) {
+                        // need to check the size of the sliding window
+                        // the end of the sliding window prev_ack +
+                        if (next_seq_num + dataSegmentSize < prev_ack + slidingWindowSize + 1) {
 
-                        synchronized (lock) {
+                            synchronized (lock) {
+                                if (isRetrasnmitting) {
+                                    // need to retransmit all the packets
+                                    // get the current next packet
+                                    cancelTimer(next_seq_num); // cancel old timer if there is one
 
-                            name_dst_ip = InetAddress.getByName(destIP);
+                                    byte[] data = packets.get(next_seq_num); // get packet
 
-                            // we have enough room to send a full data segment
+                                    DatagramPacket packet = new DatagramPacket(data, data.length,
+                                            name_dst_ip,
+                                            dst_port);
+                                    server_socket.send(packet);
+                                    printPacket(sendDataBytes, false); // send last data
 
-                            if (next_seq_num == 1 && !lastPacket) {
-                                // the first packet of data we send
-                                // this packet has to include the file name and the file name size
+                                    startTimer(next_seq_num);
+                                    int last_seq_num = SequenceNumbers.get(SequenceNumbers.size() - 1);
 
-                                byte[] data = new byte[dataSegmentSize];
-
-                                // need to get the size of the file name
-                                byte[] fileNameAsBytes = fileName.getBytes();
-
-                                byte[] fileNameLengthBytes = new byte[4];
-                                ByteBuffer buffer = ByteBuffer.wrap(fileNameLengthBytes);
-                                buffer.putInt(fileNameAsBytes.length);
-
-                                int fileDataLength = fileReader.read(data, 0,
-                                        dataSegmentSize - fileNameAsBytes.length - 4);
-
-                                byte[] dataBytes = new byte[dataSegmentSize - fileNameAsBytes.length - 4];
-
-                                // need to copy 0 to fileDatalenght into the dataBYtes buffer
-                                System.arraycopy(data, 0, dataBytes, 0, fileDataLength);
-
-                                byte[] dataPacket = new byte[fileDataLength + 4 + fileNameAsBytes.length];
-
-                                ByteBuffer packetBuffer = ByteBuffer.wrap(dataPacket);
-                                packetBuffer.put(fileNameLengthBytes);
-                                packetBuffer.put(fileNameAsBytes);
-                                packetBuffer.put(dataBytes);
-
-                                // now the dataPacket should contain all the
-                                sendDataBytes = buildPacket(dataPacket, 0, next_seq_num);
-
-                            } else {
-                                // we send more data but not the first byte
-                                byte[] dataToSend = new byte[dataSegmentSize];
-                                // in this case we can fill the entire segment with data
-
-                                int fileDataLength = fileReader.read(dataToSend, 0, dataSegmentSize);
-
-                                // check if this is the last data
-                                if (fileDataLength == -1) {
-                                    sendDataBytes = buildPacket(new byte[0], 0, curr_seq_num);
-                                    // we send a blank packet with no data that will be dropped by the reciver
-                                    lastPacket = true;
-                                } else {
-                                    // this is the case where we have valid data
-                                    byte[] data = new byte[dataSegmentSize - fileDataLength];
-                                    System.arraycopy(dataToSend, 0, data, 0, fileDataLength); // copys the datatosend
-                                                                                              // into
-                                                                                              // data
-
-                                    // check
-                                    if (dataSegmentSize > data.length) {
-                                        lastPacket = true;
+                                    if (last_seq_num == next_seq_num) {
+                                        isRetrasnmitting = false;
                                     }
-                                    sendDataBytes = buildPacket(data, 0, next_seq_num);
+
+                                    updateVarsSend(sendDataBytes, isData(sendDataBytes));
+
+                                } else {
+
+                                    name_dst_ip = InetAddress.getByName(destIP);
+
+                                    // we have enough room to send a full data segment
+
+                                    if (next_seq_num == 1 && !lastPacket) {
+                                        // the first packet of data we send
+                                        // this packet has to include the file name and the file name size
+
+                                        byte[] data = new byte[dataSegmentSize]; // this is 500
+
+                                        // need to get the size of the file name
+                                        byte[] fileNameAsBytes = fileName.getBytes(); // this is 10
+
+                                        byte[] fileNameLengthBytes = new byte[4];
+                                        ByteBuffer buffer = ByteBuffer.wrap(fileNameLengthBytes);
+                                        buffer.putInt(fileNameAsBytes.length);
+
+                                        int fileDataLength = fileReader.read(data, 0,
+                                                dataSegmentSize - fileNameAsBytes.length - 4);
+                                        amountDataSent += fileDataLength; 
+
+                                        byte[] dataBytes = new byte[dataSegmentSize - fileNameAsBytes.length - 4];
+
+                                        // need to copy 0 to fileDatalenght into the dataBYtes buffer
+                                        System.arraycopy(data, 0, dataBytes, 0, fileDataLength);
+
+                                        byte[] dataPacket = new byte[fileDataLength + 4 + fileNameAsBytes.length];
+
+                                        ByteBuffer packetBuffer = ByteBuffer.wrap(dataPacket);
+                                        packetBuffer.put(fileNameLengthBytes);
+                                        packetBuffer.put(fileNameAsBytes);
+                                        packetBuffer.put(dataBytes);
+
+                                        // now the dataPacket should contain all the
+                                        sendDataBytes = buildPacket(dataPacket, 0, next_seq_num);
+
+                                    } else {
+                                        // we send more data but not the first byte
+                                        byte[] dataToSend = new byte[dataSegmentSize];
+                                        // in this case we can fill the entire segment with data
+
+                                        int fileDataLength = fileReader.read(dataToSend, 0, dataSegmentSize);
+
+                                        // check if this is the last data
+                                        if (fileDataLength == -1) {
+                                            sendDataBytes = buildPacket(new byte[0], 0, next_seq_num); // TODO: check
+                                                                                                       // out curr
+                                                                                                       // sequence
+                                                                                                       // number
+                                            // we send a blank packet with no data that will be dropped by the reciver
+                                            lastPacket = true;
+                                        } else {
+                                            // this is the case where we have valid data
+                                            byte[] data = new byte[dataSegmentSize - fileDataLength];
+                                            amountDataSent+= data.length; 
+                                            System.arraycopy(dataToSend, 0, data, 0, fileDataLength); // copys the
+                                                                                                      // datatosend
+                                                                                                      // into
+                                                                                                      // data
+
+                                            // check
+                                            if (dataSegmentSize > data.length) {
+                                                lastPacket = true;
+                                            }
+                                            sendDataBytes = buildPacket(data, 0, next_seq_num);
+                                            // TODO: do we need to send an ack with the the data? I dont think so
+
+                                        }
+
+                                    }
+                                    // now send the data
+                                    DatagramPacket packet = new DatagramPacket(sendDataBytes, sendDataBytes.length,
+                                            name_dst_ip,
+                                            dst_port);
+                                    server_socket.send(packet);
+                                    num_packets_sent++;
+                                    packets.put(next_seq_num, sendDataBytes); // add in to packet map
+                                    SequenceNumbers.add(next_seq_num);
+                                    startTimer(next_seq_num);
+                                    stateus.put(next_seq_num,
+                                            new TCPState(prev_ack, next_seq_num, curr_seq_num, next_ack_num));
+                                    printPacket(sendDataBytes, false);
+                                    updateVarsSend(sendDataBytes, isData(sendDataBytes));
 
                                 }
-
                             }
-                            // now send the data
-                            DatagramPacket packet = new DatagramPacket(sendDataBytes, sendDataBytes.length, name_dst_ip,
-                                    dst_port);
-                            server_socket.send(packet);
-                            updateVarsSend(sendDataBytes, true);
-
                         }
-                    }
 
+                    }
                 }
             } catch (FileNotFoundException f) {
                 System.out.println("The file was not found");
@@ -457,108 +706,174 @@ public class SendHost {
             byte[] data = new byte[mtu];
             DatagramPacket packet = new DatagramPacket(data, mtu); // data now stores the packet
 
-            try {
-                server_socket.receive(packet);
+            while (!instantiateFIN) {
 
-            } catch (Exception e) {
-                System.out.println("Reciving packet threw error");
-            }
+                try {
+                    server_socket.receive(packet);
 
-            if (validateChecksum(data)) {
+                } catch (Exception e) {
+                    System.out.println("Reciving packet threw error");
+                }
 
-                // need a way to pull out the ack number from the recived packet
-                int ackNumber = pullAck(data);
-                int seqNumberPacket = pullSeqNum(data); // this should = the next epected ack
+                if (validateChecksum(data)) {
 
-                // this ack number should be equal to the next sequence number of for the first
-                // case 1
-                if (ackNumber == next_seq_num || (isData(data) && seqNumberPacket == next_ack_num)) {
-                    // this means we go an acknowlegement/data from the data we just sent
-                    // get the destination name
-                    try {
-                        name_dst_ip = InetAddress.getByName(destIP);
-                    } catch (UnknownHostException e) {
-                        System.out.println("Could not find the host");
-                        System.exit(-1);
-                    }
+                    // need a way to pull out the ack number from the recived packet
+                    int ackNumber = pullAck(data); // this is 1001
+                    int seqNumberPacket = pullSeqNum(data); // this should = the next epected ack // this is 1
 
-                    if (isData(data)) {
-                        // this is where we get data back from the reciever
-                        // ok now we need to update the next ack etc
-                        // we have now just recived data from the incoming packet
-                        boolean isData = true;
-                        updateVarsRec(data, isData);
-
-                        // now we need to send a packet back that we recived the data
-                        // flags = 1 means the ACK flag is set
-                        byte[] ackToSend = buildPacket(new byte[0], 1, curr_seq_num); // our sequence number should not
-                                                                                      // change because we did not send
-                                                                                      // any
-                                                                                      // data
-
-                        // this will build a packet that contains the new ack number
-
-                        // now we neede to send the datagram
-                        DatagramPacket ackDatagram = new DatagramPacket(ackToSend, ackToSend.length, name_dst_ip,
-                                dst_port);
-
+                    // this ack number should be equal to the next sequence number of for the first
+                    // case 1
+                    if (ackNumber == next_seq_num || (isData(data) && seqNumberPacket == next_ack_num)) { // TODO: ack
+                                                                                                          // number will
+                                                                                                          // still be
+                        // this means we go an acknowlegement/data from the data we just sent
+                        // get the destination name
+                        printPacket(data, true);
                         try {
-                            server_socket.send(ackDatagram); // send the packet
-
-                        } catch (IOException e) {
-                            System.out.println("Failed to send packet");
+                            name_dst_ip = InetAddress.getByName(destIP);
+                        } catch (UnknownHostException e) {
+                            System.out.println("Could not find the host");
                             System.exit(-1);
                         }
 
-                        // and eventually send back data
+                        // recived the ack so we can cancel the timer
+                        cancelTimer(ackNumber); // removes timer from stack
 
-                    } else {
-                        // this is where we just get an ack back
-                        // ackNumber == next_seq_num the ack recevied is == to the next sequence number
-                        // we are going to send
-                        // TODO: figure out what happens here
+                        if (isData(data)) { // this evaluates to true
+                            // this is where we get data back from the reciever
+                            // ok now we need to update the next ack etc
+                            // we have now just recived data from the incoming packet
+                            updateVarsRec(data, isData(data));
 
-                        // after we are done sendind data we need to send a FIN
-                        prev_ack = ackNumber -1; // we did not recive any data so the next ack will be the same 
-                        // we have send all our data and need to send our closing fin on the other side
+                            // now we need to send a packet back that we recived the data
+                            // flags = 1 means the ACK flag is set
+                            byte[] ackToSend = buildPacket(new byte[0], 1, curr_seq_num); // our sequence number should
+                                                                                          // not
+                                                                                          // change because we did not
+                                                                                          // send
+                                                                                          // any
+                                                                                          // data
 
-                        if (lastPacket){
-                            // need to send a FIN packet to the server
-                            byte[] finData = buildPacket(new byte[0], 2, next_seq_num); 
-                            DatagramPacket finDatagramPacket = new DatagramPacket(finData, finData.length, name_dst_ip, dst_port); 
+                            // this will build a packet that contains the new ack number
+
+                            // now we neede to send the datagram
+                            DatagramPacket ackDatagram = new DatagramPacket(ackToSend, ackToSend.length, name_dst_ip,
+                                    dst_port);
+
                             try {
-                                server_socket.send(finDatagramPacket);
+                                server_socket.send(ackDatagram); // send the packet
+                                num_packets_sent++;
+
+                            } catch (IOException e) {
+                                System.out.println("Failed to send packet");
+                                System.exit(-1);
+                            }
+                            printPacket(ackToSend, false);
+                            // ok we have sent the ack now need to index array for the current sequence
+                            // number
+                            byte[] returned_ack = packets.get(curr_seq_num);
+
+                            if (returned_ack != null) {
+                                // now we need to pull out the time
+                                long start_time = pullTime(returned_ack);
+                                recalculateTimeout(curr_seq_num, start_time);
+                            }
+                            // TODO: have to make sure retransmitted packets do not get timeout set
+
+                        } else {
+                            // this is where we just get an ack back
+                            // ackNumber == next_seq_num the ack recevied is == to the next sequence number
+                            // we are going to send
+                            // TODO: figure out what happens here
+
+                            // after we are done sendind data we need to send a FIN
+                            prev_ack = ackNumber - 1; // we did not recive any data so the next ack will be the same
+                            // we have send all our data and need to send our closing fin on the other side
+
+                            // TODO: need to acknowledge that the packet came back
+
+                            if (lastPacket) {
+                                // need to send a FIN packet to the server
+                                byte[] finData = buildPacket(new byte[0], 2, next_seq_num);
+                                DatagramPacket finDatagramPacket = new DatagramPacket(finData, finData.length,
+                                        name_dst_ip, dst_port);
+                                try {
+                                    server_socket.send(finDatagramPacket);
+                                    num_packets_sent++; 
+
+                                } catch (Exception e) {
+                                    System.out.println("Failed to send FIN packet");
+                                    System.exit(-1);
+                                }
+                                next_seq_num++; // TODO: check this
+                                packets.put(next_seq_num, finData);
+                                SequenceNumbers.add(next_seq_num);
+                                startTimer(next_seq_num);
+                                printPacket(finData, false);
+
+                                updateVarsSend(finData, isData(finData));
 
                             }
-                            catch (Exception e) {
-                                System.out.println("Failed to send FIN packet"); 
-                                System.exit(-1); 
-                            }
-
-                            updateVarsSend(finData, true); 
 
                         }
 
+                    } else {
+                        // TODO: deal with duplicate ACKS
+                        printPacket(data, true);
+                        int ackNum = pullAck(data);
+                        DuplicateAcks.add(ackNum);
+                        if (ackNum < next_seq_num) {
+                            next_seq_num = ackNum;
+                        }
+                        if (DuplicateAcks.size() >= 3 &&
+                                DuplicateAcks.get(DuplicateAcks.size() - 1)
+                                        .equals(DuplicateAcks.get(DuplicateAcks.size() - 2))
+                                &&
+                                DuplicateAcks.get(DuplicateAcks.size() - 2)
+                                        .equals(DuplicateAcks.get(DuplicateAcks.size() - 3))) {
+                            resetState(ackNum);
+                        }
 
                     }
-
                 } else {
-                    // TODO: deal with duplicate ACKS
-
-                    int ackNum = pullAck(data);
-                    if (ackNum < next_seq_num) { // we get an old ack, need to send our next sequence number with the
-                                                 // old
-                                                 // ack
-                        next_seq_num = ackNum;
-                    }
+                    // checksum was not valid
+                    num_incorrect_checksums++;
                 }
-            } else {
-                // checksum was not valid
-                num_incorrect_checksums++; 
             }
-
         }
 
+    }
+
+    // The tcp state class
+    public class TCPState {
+        private int TCPState_prev_ack;
+        private int TCPState_next_seq_num;
+        private int TCPState_curr_seq_num;
+        private int TCPState_next_ack_num;
+
+        public TCPState(int TCPState_prev_ack, int TCPState_next_seq_num, int TCPState_curr_seq_num,
+                int TCPState_next_ack_num) {
+            this.TCPState_prev_ack = TCPState_prev_ack;
+            this.TCPState_next_seq_num = TCPState_next_seq_num;
+            this.TCPState_curr_seq_num = TCPState_curr_seq_num;
+            this.TCPState_curr_seq_num = TCPState_curr_seq_num;
+        }
+
+        public int getTCPState_prev_ack() {
+            return TCPState_prev_ack;
+        }
+
+        public int getTCPState_next_seq_num() {
+            return TCPState_next_seq_num;
+        }
+
+        public int getTCPState_curr_seq_num() {
+            return TCPState_curr_seq_num;
+        }
+
+        public int getTCPState_next_ack_num() {
+            return TCPState_next_ack_num;
+        }
     }
 
 }
