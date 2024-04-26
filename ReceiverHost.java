@@ -2,15 +2,19 @@ import java.net.*;
 import java.nio.ByteBuffer;
 
 public class ReceiverHost {
+    private static final int SYN = 4;
+    private static final int FIN = 2;
+    private static final int ACK = 1;
+
     private int port;
     private int mtu;
     private int sws;
-    private int next_seq_num;
-    private int curr_seq_num;
-    private int prev_ack;
-    private int next_ack;
+    private int next_seq_num; // this is the next sequence number that we are going to send
+    private int curr_seq_num; // this is the current sequence number we are on
+    private int prev_ack_num; // this is the last received acc
+    private int next_ack_num; // this is the next byte we expect from the sender
     private int next_base_ack;
-    private int timeout_val;
+    private long timeout_val;
     private int payload_size;
     private boolean finished_receiving;
     private boolean connected;
@@ -25,16 +29,20 @@ public class ReceiverHost {
 
         curr_seq_num = 0;
         next_seq_num = 0;
-        prev_ack = -1;
-        next_ack = 0;
+        prev_ack_num = -1;
+        next_ack_num = 0;
         next_base_ack = 0;
         payload_size = mtu - 24;
 
         finished_receiving = false;
         connected = false;
 
-        timeout_val = 5000;
+        timeout_val = 5L * 1_000_000_000L;
 
+        runReceiver(port, mtu, sws, filePathName);
+    }
+
+    private void runReceiver(int port, int mtu, int sws, String filePathName){
         try{
             receive_socket = new DatagramSocket(port);
 
@@ -44,23 +52,24 @@ public class ReceiverHost {
             while(!finished_receiving){
                 receive_socket.receive(incomingPacket);
 
-                int ackCheck = verifyAck(incomingData);
-                if(ackCheck != -1){
-                    int dstPort = incomingPacket.getPort();
-                    InetAddress dstAddr = incomingPacket.getAddress();
-                    int length = pullLength(incomingData);
+                int dstPort = incomingPacket.getPort();
+                InetAddress dstAddr = incomingPacket.getAddress();
+
+                if(verifyAck(incomingData) != -1){
                     printPacket(incomingData, true);
                     receiveUpdate(incomingData);
 
-                    // check if syn/fin flags are set, or if packet contains data
-                    if(((length >> 1) & 1) == 1 || ((length >> 2) & 1) == 1 || (length >> 3) > 0){
+                    int length = pullLength(incomingData);
+                    int actualLength = length >> 3;
+
+                    if(isData(incomingData)){
                         // packet has data
                         // exclude flags from length check
-                        if((length >> 3) > 0){
-                            next_ack = pullSeqNum(incomingData) + length;
+                        if(actualLength > 0){
+                            next_ack_num = pullSeqNum(incomingData) + actualLength;
 
                             if(connected){
-                                if(next_ack + payload_size < next_base_ack + sws && length == payload_size){
+                                if(next_ack_num + payload_size < next_base_ack + sws && length == payload_size){
                                     continue;
                                 }
                                 else{
@@ -74,21 +83,23 @@ public class ReceiverHost {
                         // packet doesn't have data
                         else{
                             // ack is set regardless
-                            int flagsTemp = 2;
+                            int flagsTemp = 1;
                             // syn flag is set
-                            if(((length >> 2) & 1) == 1){
+                            if(isFlagSet(length, SYN)){
                                 flagsTemp += 4;
                             }
                             // fin flag is set
-                            if((length & 1) == 1){
-                                flagsTemp += 1;
+                            if(isFlagSet(length, FIN)){
+                                flagsTemp += 2;
                             }
+
+                            next_ack_num = pullSeqNum(incomingData) + 1;
 
                             byte[] ackPacket = buildPacket(new byte[0], flagsTemp, next_seq_num);
                             printPacket(ackPacket, false);
                             receive_socket.send(new DatagramPacket(ackPacket, ackPacket.length, dstAddr, dstPort));
 
-                            if(prev_ack + 1 == next_seq_num){
+                            if(prev_ack_num + 1 == next_seq_num){
                                 // setTimer(true);
                             }
                             sendUpdate(ackPacket);
@@ -99,17 +110,14 @@ public class ReceiverHost {
                     else{
                         if(next_seq_num == 1){
                             connected = true;
-                        }else if(next_seq_num == 2){
-                            connected = false;
-                            finished_receiving = true;
+                        }else if(isFlagSet(length, FIN)){
+                            // close connection
                         }
                     }
 
                 }
                 // send duplicate ack, packets not in order
                 else{
-                    int dstPort = incomingPacket.getPort();
-                    InetAddress dstAddr = incomingPacket.getAddress();
                     byte[] ackPacket = buildPacket(new byte[0], 2, curr_seq_num);
                     printPacket(ackPacket, false);
                     receive_socket.send(new DatagramPacket(ackPacket, ackPacket.length, dstAddr, dstPort));
@@ -121,18 +129,45 @@ public class ReceiverHost {
         }
     }
 
+    private boolean isData(byte[] packet) {
+        // check to see if there is data in the packet
+        int length = pullLength(packet);
+        int actualLength = length >> 3;
+
+        if (actualLength > 0) { // Data exists in the packet
+            return true;
+        } else {
+            if (isFlagSet(length, SYN)) { // check SYN bit
+                return true;
+            } else { // check FIN bit, returns false if no data is present and SYN/FIN are not set
+                return isFlagSet(length, FIN);
+            }
+        }
+    }
+
+    private boolean isFlagSet(int length, int flag){
+        // flag var values: SYN = 4, FIN = 2, ACK = 1
+
+        if(flag == SYN){
+            return (length >> 2 & 1) == 1;
+        }else if(flag == FIN){
+            return (length >> 1 & 1) == 1;
+        }else if(flag == ACK){
+            return (length & 1) == 1;
+        }
+
+        return false;
+    }
+
     private int verifyAck(byte[] packet){
         int ackNum = pullAck(packet);
         if(ackNum != next_seq_num){
             return -1;
         }
 
-        int length = pullLength(packet);
-
-        // check if syn/fin flags are set, or if packet contains data
-        if(((length >> 1) & 1) == 1 || ((length >> 2) & 1) == 1 || (length >> 3) > 0){
+        if(isData(packet)){
             int seqNum = pullSeqNum(packet);
-            if(seqNum != next_ack){
+            if(seqNum != next_ack_num){
                 return -1;
             }
         }
@@ -143,20 +178,18 @@ public class ReceiverHost {
     private void receiveUpdate(byte[] packet){
         int length = pullLength(packet);
 
-        // check if syn/fin flags are set, or if packet contains data
-        if(((length >> 1) & 1) == 1 || ((length >> 2) & 1) == 1 || (length >> 3) > 0) {
+        if(isData(packet)) {
             // exclude flags from length check
             if((length >> 3) > 0){
-                next_ack = pullSeqNum(packet) + (length >> 3);
+                next_ack_num = pullSeqNum(packet) + (length >> 3);
             }
             else{
-                next_ack = pullSeqNum(packet) + 1;
+                next_ack_num = pullSeqNum(packet) + 1;
             }
         }
 
-        // check if ack flag is set
-        if(((length >> 1) & 1) == 1){
-            prev_ack = pullAck(packet) - 1;
+        if(isFlagSet(length, ACK)){
+            prev_ack_num = pullAck(packet) - 1;
             // setTimer(false);
         }
     }
@@ -164,8 +197,7 @@ public class ReceiverHost {
     private void sendUpdate(byte[] packet){
         int length = pullLength(packet);
 
-        // check if syn/fin flags are set, or if packet contains data
-        if(((length >> 1) & 1) == 1 || ((length >> 2) & 1) == 1 || (length >> 3) > 0){
+        if(isData(packet)){
             curr_seq_num = next_seq_num;
             // exclude flags from length check
             if((length >> 3) > 0){
@@ -175,7 +207,7 @@ public class ReceiverHost {
                 next_seq_num = curr_seq_num + 1;
             }
 
-            next_base_ack = next_ack;
+            next_base_ack = next_ack_num;
         }
     }
 
@@ -262,7 +294,7 @@ public class ReceiverHost {
         // the next 4 bytes are the current ack intially 0
         byte[] currentAckBytes = new byte[4];
         ByteBuffer buffer2 = ByteBuffer.wrap(currentAckBytes);
-        buffer2.putInt(this.next_ack);
+        buffer2.putInt(this.next_ack_num);
 
         // now to do the timestamp
         byte[] timeStamp = new byte[8];

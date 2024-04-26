@@ -94,11 +94,11 @@ public class SendHost {
         // ok now that the server is accepting packets on this port we need to start
         // some threads
 
-        RecThread reciever_thread = new RecThread();
+        RecThread receiver_thread = new RecThread();
         SendThread sender_thread = new SendThread();
 
         // start threads
-        reciever_thread.start();
+        receiver_thread.start();
         sender_thread.start();
 
         // now we need to send out the first part of the three-way handshake
@@ -144,7 +144,7 @@ public class SendHost {
             stateus.put(next_seq_num, new TCPState(prev_ack, next_seq_num, curr_seq_num, next_ack_num));
             printPacket(data, false);
 
-            // now we need to update the next_sequence number becasue it should be 1
+            // now we need to update the next_sequence number because it should be 1
             next_seq_num++; // increments by 1
             num_packets_sent++; 
 
@@ -154,12 +154,12 @@ public class SendHost {
 
         try {
 
-            reciever_thread.join();
+            receiver_thread.join();
             sender_thread.join();
         }
 
         catch (InterruptedException e) {
-            System.out.println("Threads interupted");
+            System.out.println("Threads interrupted");
             System.exit(-1);
         }
         // now print out summary info
@@ -197,7 +197,7 @@ public class SendHost {
         ByteBuffer buffer4 = ByteBuffer.wrap(lengthBytes);
         buffer4.putInt(length);
 
-        // no the zeros field
+        // now the zeros field
         byte[] zeros = new byte[2];
 
         // TODO: need to fill in the checksum
@@ -219,7 +219,7 @@ public class SendHost {
         packetBuffer.put(checkSumBytesZeros);
         packetBuffer.put(data);
 
-        short newChecksum = calculateChecksum(packet); // this should be of lenght 2 now we just have to reconstruct the
+        short newChecksum = calculateChecksum(packet); // this should be of length 2 now we just have to reconstruct the
                                                        // packet
 
         byte[] checksumBytes = new byte[2];
@@ -563,7 +563,7 @@ public class SendHost {
                 while (!instantiateFIN) {
                     byte[] sendDataBytes = new byte[slidingWindowSize];
 
-                    if (foundHost && !lastPacket) { // we have recived a message from the host
+                    if (foundHost && !lastPacket) { // we have received a message from the host
 
                         // need to check the size of the sliding window
                         // the end of the sliding window prev_ack +
