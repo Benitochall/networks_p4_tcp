@@ -80,7 +80,7 @@ public class ReceiverHost {
                                 }
                             }
                         }
-                        // packet doesn't have data
+                        // packet doesn't have data, SYN/FIN received
                         else{
                             // ack is set regardless
                             int flagsTemp = 1;
@@ -89,7 +89,7 @@ public class ReceiverHost {
                                 flagsTemp += 4;
                             }
                             // fin flag is set
-                            if(isFlagSet(length, FIN)){
+                            else if(isFlagSet(length, FIN)){
                                 flagsTemp += 2;
                             }
 
@@ -103,15 +103,26 @@ public class ReceiverHost {
                                 // setTimer(true);
                             }
                             sendUpdate(ackPacket);
+
+                            if(isFlagSet(length, FIN)){
+                                // not sure if curr_seq_num is correct here
+                                byte[] finPacket = buildPacket(new byte[0], FIN, curr_seq_num);
+                                printPacket(finPacket, false);
+                                receive_socket.send(new DatagramPacket(finPacket, finPacket.length, dstAddr, dstPort));
+                                sendUpdate(finPacket);
+                            }
                         }
 
-
                     }
+                    // received an ACK
                     else{
                         if(next_seq_num == 1){
                             connected = true;
                         }else if(isFlagSet(length, FIN)){
-                            // close connection
+                            // close connection, final ack received
+                            if(next_seq_num == pullAck(incomingData)){
+                                finished_receiving = true;
+                            }
                         }
                     }
 
