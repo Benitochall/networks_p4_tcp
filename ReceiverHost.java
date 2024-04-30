@@ -1,31 +1,29 @@
 import java.net.*;
 import java.nio.ByteBuffer;
+import java.util.HashMap;
 
 public class ReceiverHost {
     private static final int SYN = 4;
     private static final int FIN = 2;
     private static final int ACK = 1;
 
-    private int port;
-    private int mtu;
-    private int sws;
     private int next_seq_num; // this is the next sequence number that we are going to send
     private int curr_seq_num; // this is the current sequence number we are on
     private int prev_ack_num; // this is the last received acc
     private int next_ack_num; // this is the next byte we expect from the sender
     private int next_base_ack;
-    private long timeout_val;
+
+    private long startTime;
     private int payload_size;
     private boolean finished_receiving;
     private boolean connected;
 
     private DatagramSocket receive_socket;
 
+    private HashMap<Integer, byte[]> recBuffer;
+
 
     public ReceiverHost(int port, int mtu, int sws, String filePathName){
-        this.port = port;
-        this.mtu = mtu;
-        this.sws = sws;
 
         curr_seq_num = 0;
         next_seq_num = 0;
@@ -37,107 +35,116 @@ public class ReceiverHost {
         finished_receiving = false;
         connected = false;
 
-        timeout_val = 5L * 1_000_000_000L;
+        startTime = System.nanoTime();
+
+        recBuffer = new HashMap<>();
 
         runReceiver(port, mtu, sws, filePathName);
     }
 
     private void runReceiver(int port, int mtu, int sws, String filePathName){
-        try{
+        try {
             receive_socket = new DatagramSocket(port);
+        }catch(Exception e){
+            System.out.println("Failed to create socket");
+            System.exit(-1);
+        }
 
-            byte[] incomingData = new byte[mtu];
-            DatagramPacket incomingPacket = new DatagramPacket(incomingData, incomingData.length);
+        byte[] incomingData = new byte[mtu];
+        DatagramPacket incomingPacket = new DatagramPacket(incomingData, incomingData.length);
 
-            while(!finished_receiving){
+        while(!finished_receiving){
+            try {
                 receive_socket.receive(incomingPacket);
+            }catch(Exception e){
+                System.out.println("Could not receive incoming packet :(");
+            }
 
-                int dstPort = incomingPacket.getPort();
-                InetAddress dstAddr = incomingPacket.getAddress();
+            int dstPort = incomingPacket.getPort();
+            InetAddress dstAddr = incomingPacket.getAddress();
 
-                if(verifyAck(incomingData) != -1){
-                    printPacket(incomingData, true);
-                    receiveUpdate(incomingData);
+            int length = pullLength(incomingData);
+            int actualLength = length >> 3;
+            long sentTime = pullTime(incomingData);
 
-                    int length = pullLength(incomingData);
-                    int actualLength = length >> 3;
+            if(verifyAck(incomingData) != -1){
+                printPacket(incomingData, true);
+                receiveUpdate(incomingData);
 
-                    if(isData(incomingData)){
-                        // packet has data
-                        // exclude flags from length check
-                        if(actualLength > 0){
-                            next_ack_num = pullSeqNum(incomingData) + actualLength;
+                if(isData(incomingData)){
+                    // packet has data
+                    // exclude flags from length check
+                    if(actualLength > 0){
+                        next_ack_num = pullSeqNum(incomingData) + actualLength;
 
-                            if(connected){
-                                if(next_ack_num + payload_size < next_base_ack + sws && length == payload_size){
-                                    continue;
-                                }
-                                else{
-                                    byte[] ackPacket = buildPacket(new byte[0], 2, curr_seq_num);
-                                    printPacket(ackPacket, false);
-                                    receive_socket.send(new DatagramPacket(ackPacket, ackPacket.length, dstAddr, dstPort));
-                                    sendUpdate(ackPacket);
-                                }
+                        if(connected){
+                            if(next_ack_num + payload_size < next_base_ack + sws && length == payload_size){
+                                continue;
+                            }
+                            else{
+                                sendPacket(dstPort, dstAddr, sentTime, ACK, curr_seq_num);
                             }
                         }
-                        // packet doesn't have data, SYN/FIN received
-                        else{
-                            // ack is set regardless
-                            int flagsTemp = 1;
-                            // syn flag is set
-                            if(isFlagSet(length, SYN)){
-                                flagsTemp += 4;
-                            }
-                            // fin flag is set
-                            else if(isFlagSet(length, FIN)){
-                                flagsTemp += 2;
-                            }
-
-                            next_ack_num = pullSeqNum(incomingData) + 1;
-
-                            byte[] ackPacket = buildPacket(new byte[0], flagsTemp, next_seq_num);
-                            printPacket(ackPacket, false);
-                            receive_socket.send(new DatagramPacket(ackPacket, ackPacket.length, dstAddr, dstPort));
-
-                            if(prev_ack_num + 1 == next_seq_num){
-                                // setTimer(true);
-                            }
-                            sendUpdate(ackPacket);
-
-                            if(isFlagSet(length, FIN)){
-                                // not sure if curr_seq_num is correct here
-                                byte[] finPacket = buildPacket(new byte[0], FIN, curr_seq_num);
-                                printPacket(finPacket, false);
-                                receive_socket.send(new DatagramPacket(finPacket, finPacket.length, dstAddr, dstPort));
-                                sendUpdate(finPacket);
-                            }
-                        }
-
                     }
-                    // received an ACK
+                    // packet doesn't have data, SYN/FIN received
                     else{
-                        if(next_seq_num == 1){
-                            connected = true;
-                        }else if(isFlagSet(length, FIN)){
-                            // close connection, final ack received
-                            if(next_seq_num == pullAck(incomingData)){
-                                finished_receiving = true;
-                            }
+                        // ack is set regardless
+                        int flagsTemp = ACK;
+                        // syn flag is set
+                        if(isFlagSet(length, SYN)){
+                            flagsTemp += SYN;
+                        }
+                        // fin flag is set
+                        else if(isFlagSet(length, FIN)){
+                            flagsTemp += FIN;
+                        }
+
+                        next_ack_num = pullSeqNum(incomingData) + 1;
+
+                        sendPacket(dstPort, dstAddr, sentTime, flagsTemp, next_seq_num);
+
+                        // not sure if this is the right spot to send this
+                        if(isFlagSet(length, FIN)){
+                            // also not sure if curr_seq_num is correct here
+                            sendPacket(dstPort, dstAddr, 0, FIN, curr_seq_num);
                         }
                     }
 
                 }
-                // send duplicate ack, packets not in order
+                // received an ACK
                 else{
-                    byte[] ackPacket = buildPacket(new byte[0], 2, curr_seq_num);
-                    printPacket(ackPacket, false);
-                    receive_socket.send(new DatagramPacket(ackPacket, ackPacket.length, dstAddr, dstPort));
-                    sendUpdate(ackPacket);
+                    if(next_seq_num == 1){
+                        connected = true;
+                    }else if(isFlagSet(length, FIN)){
+                        // close connection, final ack received
+                        if(next_seq_num == pullAck(incomingData)){
+                            finished_receiving = true;
+                        }
+                    }
                 }
             }
-        }catch(Exception e){
-            System.exit(1);
+            // send duplicate ack, packets not in order
+            else{
+                // need to store the received packet in the receiver buffer
+                // and ack the last successful byte received
+                recBuffer.put(curr_seq_num, incomingData);
+
+                // not sure if the sequence num is correct here
+                sendPacket(dstPort, dstAddr, sentTime, ACK, prev_ack_num);
+            }
         }
+    }
+
+    private void sendPacket(int dstPort, InetAddress dstAddr, long sentTime, int flags, int seqNum) {
+        byte[] packet = buildPacket(new byte[0], flags, seqNum, sentTime);
+        printPacket(packet, false);
+        try {
+            receive_socket.send(new DatagramPacket(packet, packet.length, dstAddr, dstPort));
+        }catch(Exception e){
+            System.out.println("Failed to send ack packet");
+            System.exit(-1);
+        }
+        sendUpdate(packet);
     }
 
     private boolean isData(byte[] packet) {
@@ -201,7 +208,6 @@ public class ReceiverHost {
 
         if(isFlagSet(length, ACK)){
             prev_ack_num = pullAck(packet) - 1;
-            // setTimer(false);
         }
     }
 
@@ -230,12 +236,17 @@ public class ReceiverHost {
 
     }
 
+    private long pullTime(byte[] packet) {
+        ByteBuffer buffer = ByteBuffer.wrap(packet);
+        buffer.position(8);
+        return buffer.getLong();
+    }
+
     private int pullLength(byte[] packet) {
         ByteBuffer buffer = ByteBuffer.wrap(packet);
         buffer.position(16);
 
         return buffer.getInt();
-
     }
 
     private int pullSeqNum(byte[] packet) {
@@ -249,53 +260,68 @@ public class ReceiverHost {
 
     private void printPacket(byte[] packet, boolean receive){
         StringBuilder sb = new StringBuilder();
-
-        int length = pullLength(packet);
-
-        if(receive){
+        if (receive) {
             sb.append("rcv");
-        }else{
+        } else {
             sb.append("snd");
         }
 
-        sb.append(" ").append(System.nanoTime());
+        long elapsedTimeNano = System.nanoTime() - startTime;
 
-        // check if s-flag is set
-        if(((length >> 2) & 1) == 1){
-            sb.append("S").append(" ");
-        }else{
-            sb.append("-").append(" ");
+        double elapsedTimeSeconds = (double) elapsedTimeNano / 1_000_000_000.0;
+
+        sb.append(" ");
+        sb.append(String.format("%.2f", elapsedTimeSeconds));
+        sb.append(" ");
+
+        int length = pullLength(packet);
+        int actualLength = length >> 3;
+        if (((length >> 2) & 1) == 1) { // SYN
+            sb.append("S");
+            sb.append(" ");
+
+        } else {
+            sb.append("-");
+            sb.append(" ");
         }
 
-        // check if a-flag is set
-        if(((length >> 1) & 1) == 1){
-            sb.append("A").append(" ");
-        }else{
-            sb.append("-").append(" ");
+        if ((length & 1) == 1) { // ACK bit
+            sb.append("A");
+            sb.append(" ");
+
+        } else {
+            sb.append("-");
+            sb.append(" ");
+
         }
 
-        // check if f-flag is set
-        if((length & 1) == 1){
-            sb.append("F").append(" ");
-        }else{
-            sb.append("-").append(" ");
+        if (((length >> 1) & 1) == 1) { // FIN
+            sb.append("F");
+            sb.append(" ");
+
+        } else {
+            sb.append("-");
+            sb.append(" ");
         }
 
-        // data flag is set if length > 0 cause the spec said so ig
-        if(length > 0){
-            sb.append("D").append(" ");
-        }else{
-            sb.append("-").append(" ");
+        if (actualLength > 0) {
+            sb.append("D");
+        } else {
+            sb.append("-");
         }
 
-        sb.append(pullSeqNum(packet)).append(" ");
-        sb.append(pullLength(packet)).append(" ");
-        sb.append(pullAck(packet));
+        int seqNum = pullSeqNum(packet);
+        sb.append(" ").append(seqNum);
 
-        System.out.println(sb);
+        sb.append(" ").append(actualLength);
+
+        int ackNum = pullAck(packet);
+        sb.append(" ").append(ackNum);
+
+        System.out.println(sb.toString());
     }
 
-    private byte[] buildPacket(byte[] data, int flags, int sequenceNumber) {
+    private byte[] buildPacket(byte[] data, int flags, int sequenceNumber, long timestamp) {
 
         // the first 4 bytes are the sequence number
         byte[] sequenceNumberBytes = new byte[4];
@@ -310,8 +336,15 @@ public class ReceiverHost {
         // now to do the timestamp
         byte[] timeStamp = new byte[8];
         ByteBuffer buffer3 = ByteBuffer.wrap(timeStamp);
-        long currTimeStamp = System.nanoTime();
-        buffer3.putLong(currTimeStamp);
+
+        boolean isAck = isFlagSet(flags, ACK);
+
+        if(isAck && timestamp == 0){
+            buffer3.putLong(timestamp);
+        }else{
+            long currTimeStamp = System.nanoTime();
+            buffer3.putLong(currTimeStamp);
+        }
 
         // now to do the length field
         int length = data.length; // this should be 0 initially
