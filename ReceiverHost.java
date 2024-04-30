@@ -1,3 +1,5 @@
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
 import java.net.*;
 import java.nio.ByteBuffer;
 import java.util.HashMap;
@@ -9,12 +11,12 @@ public class ReceiverHost {
 
     private int next_seq_num; // this is the next sequence number that we are going to send
     private int curr_seq_num; // this is the current sequence number we are on
-    private int prev_ack_num; // this is the last received acc
+    private int prev_ack_num; // this is the last received ack
     private int next_ack_num; // this is the next byte we expect from the sender
     private int next_base_ack;
 
-    private long startTime;
-    private int payload_size;
+    private final long startTime;
+    private final int payload_size;
     private boolean finished_receiving;
     private boolean connected;
 
@@ -23,7 +25,7 @@ public class ReceiverHost {
     private HashMap<Integer, byte[]> recBuffer;
 
 
-    public ReceiverHost(int port, int mtu, int sws, String filePathName){
+    public ReceiverHost(int port, int mtu, int sws, String fileName){
 
         curr_seq_num = 0;
         next_seq_num = 0;
@@ -39,10 +41,10 @@ public class ReceiverHost {
 
         recBuffer = new HashMap<>();
 
-        runReceiver(port, mtu, sws, filePathName);
+        runReceiver(port, mtu, sws, fileName);
     }
 
-    private void runReceiver(int port, int mtu, int sws, String filePathName){
+    private void runReceiver(int port, int mtu, int sws, String fileName){
         try {
             receive_socket = new DatagramSocket(port);
         }catch(Exception e){
@@ -52,6 +54,16 @@ public class ReceiverHost {
 
         byte[] incomingData = new byte[mtu];
         DatagramPacket incomingPacket = new DatagramPacket(incomingData, incomingData.length);
+
+        FileOutputStream fileWriter = null;
+        try {
+            fileWriter = new FileOutputStream(fileName);
+        } catch (FileNotFoundException e) {
+            System.out.println("The file was not found");
+            System.exit(-1);
+        }
+
+        assert fileWriter != null;
 
         while(!finished_receiving){
             try {
@@ -71,7 +83,7 @@ public class ReceiverHost {
                 printPacket(incomingData, true);
                 receiveUpdate(incomingData);
 
-                if(isData(incomingData)){
+                if(isSynFinData(incomingData)){
                     // packet has data
                     // exclude flags from length check
                     if(actualLength > 0){
@@ -83,33 +95,29 @@ public class ReceiverHost {
                             }
                             else{
                                 sendPacket(dstPort, dstAddr, sentTime, ACK, curr_seq_num);
+
+                                try {
+                                    fileWriter.write(pullData(incomingData));
+                                } catch (Exception e) {
+                                    System.out.println("Failed writing to file");
+                                    System.exit(-1);
+                                }
                             }
                         }
                     }
                     // packet doesn't have data, SYN/FIN received
                     else{
-                        // ack is set regardless
-                        int flagsTemp = ACK;
-                        // syn flag is set
-                        if(isFlagSet(length, SYN)){
-                            flagsTemp += SYN;
-                        }
-                        // fin flag is set
-                        else if(isFlagSet(length, FIN)){
-                            flagsTemp += FIN;
-                        }
-
                         next_ack_num = pullSeqNum(incomingData) + 1;
 
-                        sendPacket(dstPort, dstAddr, sentTime, flagsTemp, next_seq_num);
-
-                        // not sure if this is the right spot to send this
-                        if(isFlagSet(length, FIN)){
-                            // also not sure if curr_seq_num is correct here
+                        if(isFlagSet(length, SYN)){
+                            // respond to SYN from sender
+                            sendPacket(dstPort, dstAddr, sentTime, ACK + SYN, next_seq_num);
+                        }else{
+                            // respond to FIN from sender
+                            sendPacket(dstPort, dstAddr, sentTime, ACK + FIN, next_seq_num);
                             sendPacket(dstPort, dstAddr, 0, FIN, curr_seq_num);
                         }
                     }
-
                 }
                 // received an ACK
                 else{
@@ -127,7 +135,9 @@ public class ReceiverHost {
             else{
                 // need to store the received packet in the receiver buffer
                 // and ack the last successful byte received
-                recBuffer.put(curr_seq_num, incomingData);
+                if(recBuffer.size() + 1 <= sws){
+                    recBuffer.put(curr_seq_num, incomingData);
+                }
 
                 // not sure if the sequence num is correct here
                 sendPacket(dstPort, dstAddr, sentTime, ACK, prev_ack_num);
@@ -137,7 +147,8 @@ public class ReceiverHost {
 
     private void sendPacket(int dstPort, InetAddress dstAddr, long sentTime, int flags, int seqNum) {
         byte[] packet = buildPacket(new byte[0], flags, seqNum, sentTime);
-        printPacket(packet, false);
+        printPacket(packet, !isFlagSet(flags, ACK));
+
         try {
             receive_socket.send(new DatagramPacket(packet, packet.length, dstAddr, dstPort));
         }catch(Exception e){
@@ -147,7 +158,7 @@ public class ReceiverHost {
         sendUpdate(packet);
     }
 
-    private boolean isData(byte[] packet) {
+    private boolean isSynFinData(byte[] packet) {
         // check to see if there is data in the packet
         int length = pullLength(packet);
         int actualLength = length >> 3;
@@ -183,7 +194,7 @@ public class ReceiverHost {
             return -1;
         }
 
-        if(isData(packet)){
+        if(isSynFinData(packet)){
             int seqNum = pullSeqNum(packet);
             if(seqNum != next_ack_num){
                 return -1;
@@ -196,7 +207,7 @@ public class ReceiverHost {
     private void receiveUpdate(byte[] packet){
         int length = pullLength(packet);
 
-        if(isData(packet)) {
+        if(isSynFinData(packet)) {
             // exclude flags from length check
             if((length >> 3) > 0){
                 next_ack_num = pullSeqNum(packet) + (length >> 3);
@@ -214,7 +225,7 @@ public class ReceiverHost {
     private void sendUpdate(byte[] packet){
         int length = pullLength(packet);
 
-        if(isData(packet)){
+        if(isSynFinData(packet)){
             curr_seq_num = next_seq_num;
             // exclude flags from length check
             if((length >> 3) > 0){
@@ -256,6 +267,16 @@ public class ReceiverHost {
 
         return buffer.getInt();
 
+    }
+
+    private byte[] pullData(byte[] packet) {
+
+        ByteBuffer buffer = ByteBuffer.wrap(packet);
+        buffer.position(24); // move buffer ahead
+
+        byte[] temp = new byte[buffer.remaining()];
+        buffer.get(temp);
+        return temp;
     }
 
     private void printPacket(byte[] packet, boolean receive){
