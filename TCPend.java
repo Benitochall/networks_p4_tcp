@@ -30,7 +30,7 @@ public class TCPend {
                 if (args[i].equals("-p")) {
                     // this is how we determine the port number
                     port = Integer.parseInt(args[++i]);
-                    if (port < 1024 || port > 49151){
+                    if (port < 0){
                         System.out.println("Invalid port number");
                         return;
                     }
@@ -41,7 +41,7 @@ public class TCPend {
                 } else if (args[i].equals("-a")) {
 
                     remote_port = Integer.parseInt(args[++i]);
-                    if (remote_port <1024 || remote_port > 41951){
+                    if (remote_port < 0){
                         System.out.println("Invalid port number");
                         return;
                     }
@@ -65,7 +65,7 @@ public class TCPend {
                 // in this case the args were properly set, and we can start the sender
 
             }
-            //SendHost send_host = new SendHost(port, remote_ip, remote_port, file_name, mtu, sws); // TODO: implement the sender
+            SendHost send_host = new SendHost(port, remote_ip, remote_port, file_name, mtu, sws);
             System.out.println("Args " + port + " " + remote_ip + " " + file_name + " " + remote_ip + " " + mtu + " " + sws); 
         }
         // java TCPend -p <port> -m <mtu> -c <sws> -f <file name>
@@ -75,8 +75,9 @@ public class TCPend {
                 if (args[i].equals("-p")) {
                     // this is how we determine the port number
                     port = Integer.parseInt(args[++i]);
-                    if (port <1024 || port > 4951){
+                    if (port < 0 ){
                         System.out.println("Invalid port number");
+                        System.out.println(port);
                         return; 
                     }
 
@@ -96,7 +97,7 @@ public class TCPend {
                 }
             }
             // invoke the receiverhost
-            //ReceiverHost receiver_host = new ReceiverHost(port, mtu, sws, file_path_name);
+            ReceiverHost receiver_host = new ReceiverHost(port, mtu, sws, file_path_name);
             System.out.println("Args " + port +" " + mtu + " " + sws + " " + file_path_name); 
 
         }
