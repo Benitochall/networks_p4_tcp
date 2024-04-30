@@ -424,6 +424,18 @@ public class SendHost {
 
     }
 
+    public boolean isFIN(byte[] packet) {
+        // so if the data message that comes in has data
+        int length = pullLength(packet);
+
+        if (((length >> 1) & 1) == 1) { // FINBIt
+            return true;
+        }
+        return false;
+
+    }
+
+
     public boolean validateChecksum(byte[] data) {
 
         // first check the acutal length of the data
@@ -621,7 +633,7 @@ public class SendHost {
                         // System.out.println("slidingWindowSize: " + slidingWindowSize);
                         
                         if (next_seq_num + dataSegmentSize < prev_ack + slidingWindowSize + 1) {
-                            System.out.println("about to send the first packet"); 
+                            // System.out.println("about to send the first packet"); 
 
                             synchronized (lock) {
                                 if (isRetrasnmitting) {
@@ -652,7 +664,7 @@ public class SendHost {
                                     // we have enough room to send a full data segment
 
                                     if (next_seq_num == 1 && !lastPacket) {
-                                        System.out.println("about to send the first packet");
+                                        // System.out.println("about to send the first packet");
                                         // the first packet of data we send
                                         // this packet has to include the file name and the file name size
 
@@ -695,7 +707,7 @@ public class SendHost {
                                         }
 
                                         byte[] dataPacket = new byte[fileDataLength];
-                                        System.out.println(dataPacket.length); 
+                                        // System.out.println(dataPacket.length); 
 
                                         System.arraycopy(data, 0, dataPacket, 0, fileDataLength);
 
@@ -742,12 +754,12 @@ public class SendHost {
                                     DatagramPacket packet = new DatagramPacket(sendDataBytes, sendDataBytes.length,
                                             name_dst_ip,
                                             dst_port);
-                                    System.out.println("seq_num: " + pullSeqNum(sendDataBytes));
-                                    int length = pullLength(sendDataBytes); 
-                                    int actualLength = length >> 3;
+                                    // System.out.println("seq_num: " + pullSeqNum(sendDataBytes));
+                                    // int length = pullLength(sendDataBytes); 
+                                    // int actualLength = length >> 3;
 
-                                    System.out.println("amount data: " + actualLength);
-                                    System.out.println("ack: " + pullAck(sendDataBytes));
+                                    // System.out.println("amount data: " + actualLength);
+                                    // System.out.println("ack: " + pullAck(sendDataBytes));
 
                                     server_socket.send(packet);
                                     num_packets_sent++;
@@ -787,7 +799,7 @@ public class SendHost {
 
                 try {
                     server_socket.receive(packet); // this will wait here
-                    System.out.println("Got packet back from the recieiver");
+                   
 
                 } catch (Exception e) {
                     System.out.println("Reciving packet threw error");
@@ -797,12 +809,14 @@ public class SendHost {
 
                     // need a way to pull out the ack number from the recived packet
                     int ackNumber = pullAck(data);
-                    System.out.println("seq_num: " + pullSeqNum(data));
-                    int length = pullLength(data); 
-                    int actualLength = length >> 3;
 
-                    System.out.println("amount data: " + actualLength);
-                    System.out.println("ack: " + ackNumber);
+                    // System.out.println("seq_num: " + pullSeqNum(data));
+                    // int length = pullLength(data); 
+                    // int actualLength = length >> 3;
+
+                    // System.out.println("amount data: " + actualLength);
+                  
+
 
 
                     // case 1
@@ -811,12 +825,14 @@ public class SendHost {
                             // this means we go an acknowlegement/data from the data we just sent
                             // get the destination name
                             printPacket(data, true);
+                           
                             try {
                                 name_dst_ip = InetAddress.getByName(destIP);
                             } catch (UnknownHostException e) {
                                 System.out.println("Could not find the host");
                                 System.exit(-1);
                             }
+                            
 
                             // recived the ack so we can cancel the timer
                             cancelTimer(curr_seq_num);
@@ -832,6 +848,7 @@ public class SendHost {
                             }
 
                             if (isData(data)) { // this evaluates to true when we have a SYN or a fin
+                                // System.out.println("here1"); 
 
                                 if (isSYNFIN(data)) {
                                     curr_seq_num += 1;
@@ -860,6 +877,8 @@ public class SendHost {
                                 printPacket(ackToSend, false);
                                 // TODO: have to make sure retransmitted packets do not get timeout set
 
+
+
                             } else {
                                 // TODO: need to acknowledge that the packet came back
                                 // TODO: need to finsih 3 way handshake
@@ -867,12 +886,12 @@ public class SendHost {
                                 if (lastPacket) {
                                     // need to send a FIN packet to the server
                                     byte[] finData = buildPacket(new byte[0], 2, next_seq_num); // TODO: check this 
-                                    System.out.println("seq_num: " + finData);
-                                    int l = pullLength(finData); 
-                                    int al = l >> 3;
+                                    // System.out.println("seq_num: " + finData);
+                                    // int l = pullLength(finData); 
+                                    // int al = l >> 3;
 
-                                    System.out.println("amount data: " + al);
-                                    System.out.println("ack: " + pullAck(finData));
+                                    // System.out.println("amount data: " + al);
+                                    // System.out.println("ack: " + pullAck(finData));
 
                                     DatagramPacket finDatagramPacket = new DatagramPacket(finData, finData.length,
                                             name_dst_ip, dst_port);
@@ -884,13 +903,14 @@ public class SendHost {
                                         System.out.println("Failed to send FIN packet");
                                         System.exit(-1);
                                     }
-                                    next_seq_num++; // TODO: check this
+                                    // next_seq_num++; // TODO: check this
                                     packets.put(next_seq_num, finData);
                                     SequenceNumbers.add(next_seq_num);
                                     startTimer(next_seq_num);
                                     printPacket(finData, false);
 
                                     updateVarsSend(finData, isData(finData));
+                                   
 
                                 }
 
@@ -898,6 +918,7 @@ public class SendHost {
 
                         } else {
                             printPacket(data, true);
+                            System.out.println("accidently came here"); 
                             int ackNum = pullAck(data); // 501
                             DuplicateAcks.add(ackNum); // add to duplicates
                             if (DuplicateAcks.size() >= 3 &&
@@ -911,7 +932,7 @@ public class SendHost {
                             }
 
                         }
-                        System.out.println("finished Reciever");
+                        // System.out.println("finished Reciever");
                     }
                 } else {
                     // checksum was not valid
