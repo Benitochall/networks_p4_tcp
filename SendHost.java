@@ -733,12 +733,10 @@ public class SendHost {
                                             lastPacket = true;
                                         } else {
                                             // this is the case where we have valid data
-                                            byte[] data = new byte[dataSegmentSize - fileDataLength];
+                                            byte[] data = new byte[fileDataLength];
                                             amountDataSent += data.length;
-                                            System.arraycopy(dataToSend, 0, data, 0, fileDataLength); // copys the
-                                                                                                      // datatosend
-                                                                                                      // into
-                                                                                                      // data
+                                            System.arraycopy(dataToSend, 0, data, 0, fileDataLength);
+                                                                                                     
 
                                             // check
                                             if (dataSegmentSize > data.length) {
@@ -918,7 +916,6 @@ public class SendHost {
 
                         } else {
                             printPacket(data, true);
-                            System.out.println("accidently came here"); 
                             int ackNum = pullAck(data); // 501
                             DuplicateAcks.add(ackNum); // add to duplicates
                             if (DuplicateAcks.size() >= 3 &&
