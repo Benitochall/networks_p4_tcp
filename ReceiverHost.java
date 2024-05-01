@@ -19,10 +19,16 @@ public class ReceiverHost {
     private final int payload_size;
     private boolean finished_receiving;
     private boolean connected;
+    private boolean endOfConnection;
+
+    private boolean temp;
 
     private DatagramSocket receive_socket;
 
     private HashMap<Integer, byte[]> recBuffer;
+
+    private int dataReceived;
+    private int oooPacketCount;
 
 
     public ReceiverHost(int port, int mtu, int sws, String fileName){
@@ -36,12 +42,17 @@ public class ReceiverHost {
 
         finished_receiving = false;
         connected = false;
+        endOfConnection = false;
+        temp = true;
 
         startTime = System.nanoTime();
 
         recBuffer = new HashMap<>();
 
-        runReceiver(port, mtu, sws, fileName);
+        while(temp){
+            runReceiver(port, mtu, sws, fileName);
+            resetConnection();
+        }
     }
 
     private void runReceiver(int port, int mtu, int sws, String fileName){
@@ -115,7 +126,7 @@ public class ReceiverHost {
                         }else{
                             // respond to FIN from sender
                             sendPacket(dstPort, dstAddr, sentTime, ACK + FIN, next_seq_num);
-                            sendPacket(dstPort, dstAddr, 0, FIN, curr_seq_num);
+                            endOfConnection = true;
                         }
                     }
                 }
@@ -123,7 +134,9 @@ public class ReceiverHost {
                 else{
                     if(next_seq_num == 1){
                         connected = true;
-                    }else if(isFlagSet(length, FIN)){
+                    }
+
+                    if(endOfConnection){
                         // close connection, final ack received
                         if(next_seq_num == pullAck(incomingData)){
                             finished_receiving = true;
@@ -143,6 +156,16 @@ public class ReceiverHost {
                 sendPacket(dstPort, dstAddr, sentTime, ACK, prev_ack_num);
             }
         }
+
+
+    }
+
+    private void resetConnection(){
+        curr_seq_num = 0;
+        next_seq_num = 0;
+        prev_ack_num = -1;
+        next_ack_num = 0;
+        next_base_ack = 0;
     }
 
     private void sendPacket(int dstPort, InetAddress dstAddr, long sentTime, int flags, int seqNum) {
