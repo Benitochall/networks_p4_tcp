@@ -24,6 +24,7 @@ public class SendHost {
     private DatagramSocket server_socket;
     private InetAddress name_dst_ip;
     private boolean lastPacket;
+    private boolean hasSentLastPacket = false;
 
     // a lock to protect the next_seq_num
     private final Object lock = new Object();
@@ -31,9 +32,9 @@ public class SendHost {
     private int dataSegmentSize;
     private int num_incorrect_checksums;
     private int num_packets_sent;
-    private int totalRetransmissions;
     private int amountDataSent;
     private int num_duplicate_acks;
+    private int num_retransmissions;
 
     private long ERTT;
     private long EDEV;
@@ -43,6 +44,7 @@ public class SendHost {
     private HashMap<Integer, byte[]> packets; // everytime we send a packet we need to have it
     private HashMap<Integer, Timer> timers;
     private HashMap<Integer, TCPState> stateus;
+    private HashMap<Integer, Integer> dupackcountlist;
     private ArrayList<Integer> SequenceNumbers;
     private ArrayList<Integer> DuplicateAcks;
     private long startTime;
@@ -61,10 +63,8 @@ public class SendHost {
         this.curr_seq_num = 0;
         this.next_ack_num = 0; // this is what we expect back when receiving data back
         this.foundHost = false;
-        // this.slidingWindowSize = sws * this.mtu;
-        this.slidingWindowSize = sws;
-        this.dataSegmentSize = mtu - 24; // this is the maximum amount of data we can send across the network at a time
-        // this is because we need space for header
+        this.slidingWindowSize = sws * this.mtu;
+        this.dataSegmentSize = mtu - 24;
         this.lastPacket = false;
         packets = new HashMap<>();
         timers = new HashMap<>();
@@ -72,17 +72,17 @@ public class SendHost {
         SequenceNumbers = new ArrayList<>();
         DuplicateAcks = new ArrayList<>();
         retransmitts = new ArrayList<>();
+        dupackcountlist = new HashMap<>();
         this.ERTT = 0;
         this.EDEV = 0;
         instantiateFIN = false;
         this.sentFin = false;
         this.isRetrasnmitting = false;
-        this.totalRetransmissions = 0;
         this.num_packets_sent = 0;
         this.amountDataSent = 0;
+        this.num_retransmissions = 0;
         this.startTime = System.nanoTime();
 
-        // first thing that needs to be done is a socket opened
         try {
             this.server_socket = new DatagramSocket(this.port);
 
@@ -92,24 +92,12 @@ public class SendHost {
             System.exit(-1);
         }
 
-        // ok now that the server is accepting packets on this port we need to start
-        // some threads
-
         RecThread receiver_thread = new RecThread();
         SendThread sender_thread = new SendThread();
 
         // start threads
         receiver_thread.start();
         sender_thread.start();
-
-        // now we need to send out the first part of the three-way handshake
-        // need to build up the packet
-        // we need the 29th bit to be a 1 because this will be a SYN
-
-        // there is no data in the first packet
-
-        // in binary, we will represent all three flags as 7
-        // just
 
         synchronized (lock) {
 
@@ -142,12 +130,9 @@ public class SendHost {
             stateus.put(next_seq_num, new TCPState(next_seq_num, curr_seq_num, next_ack_num));
             printPacket(data, false);
 
-            // now we need to update the next_sequence number because it should be 1
             next_seq_num++; // increments by 1
             num_packets_sent++;
 
-            // ok we just sent a packet with a sequence number of 0 and a current ack of 0
-            // the next ack should come back as 1
         }
 
         try {
@@ -171,9 +156,42 @@ public class SendHost {
             System.out.println("Threads interrupted");
             System.exit(-1);
         }
-        // now print out summary info
-        printSummary();
 
+    }
+
+    public int getDataTransfered() {
+        return amountDataSent;
+    }
+
+    public int getNumPacketsSent() {
+        return num_packets_sent;
+    }
+
+    public int getIncorrectChecksums() {
+        return num_incorrect_checksums;
+    }
+
+    public int getRetransmissions() {
+        return num_retransmissions;
+    }
+
+    public int getDuplicateAcks() {
+        return num_duplicate_acks;
+    }
+
+    public void incrementDupackCount(int seqnum) {
+        if (dupackcountlist.containsKey(seqnum)) {
+            int count = dupackcountlist.get(seqnum);
+            count++;
+            // if (count == 16) {
+            //     System.out.println("Too many retransmitts. Exiting program");
+            //     System.exit(-1);
+            // }
+            dupackcountlist.put(seqnum, count);
+        } else {
+            dupackcountlist.put(seqnum, 1);
+        }
+       
     }
 
     public byte[] buildPacket(byte[] data, int flags, int sequenceNumber) {
@@ -472,53 +490,58 @@ public class SendHost {
     }
 
     private void resetState(int seqNum) {
-        System.out.println("reseting state");
+
         TCPState old_state = stateus.get(seqNum);
-        System.out.println(old_state.getTCPState_next_ack_num());
         next_seq_num = old_state.getTCPState_next_seq_num(); // 977
         curr_seq_num = old_state.getTCPState_curr_seq_num(); // 1
         next_ack_num = old_state.getTCPState_next_ack_num(); // 1
 
         // get the current next packet
         // need to get the packet
-        System.out.println("is Retransmitting");
-        System.out.println(next_seq_num);
-        System.out.println(SequenceNumbers);
 
-        while (isRetrasnmitting) {
+        next_seq_num = next_seq_num - (mtu-24); 
+       
 
-            byte[] data = packets.get(next_seq_num); // this is 977
-            System.out.println(next_seq_num);
-            // now cancel the timer on this packet
-            int length = pullLength(data);
-            int actualLength = length >> 3;
+        synchronized (lock) {
 
-            cancelTimer(next_seq_num + actualLength); // cancels the timer
-            retransmitts.add(next_seq_num + actualLength);
+            while (isRetrasnmitting) {
+                if (next_seq_num + dataSegmentSize < prev_ack + slidingWindowSize + 1) {
 
-            data = updateRetransmit(data);
+                    num_retransmissions++;
+                    incrementDupackCount(next_seq_num);
 
-            DatagramPacket packet = new DatagramPacket(data, data.length,
-                    name_dst_ip,
-                    dst_port);
-            try {
-                server_socket.send(packet);
-            } catch (IOException e) {
-                e.printStackTrace();
+                    byte[] data = packets.get(next_seq_num); // this is 977
+                    // now cancel the timer on this packet
+                    int length = pullLength(data);
+                    int actualLength = length >> 3;
+
+                    cancelTimer(next_seq_num + actualLength); // cancels the timer
+                    retransmitts.add(next_seq_num + actualLength);
+
+                    data = updateRetransmit(data);
+
+                    DatagramPacket packet = new DatagramPacket(data, data.length,
+                            name_dst_ip,
+                            dst_port);
+                    try {
+                        server_socket.send(packet);
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                    num_packets_sent++;
+
+                    printPacket(data, false); // send last data
+
+                    int last_seq_num = SequenceNumbers.get(SequenceNumbers.size() - 1);
+
+                    if (last_seq_num == next_seq_num) {
+                        isRetrasnmitting = false;
+                    }
+
+                    updateVarsSend(data, isData(data));
+                }
+                startTimer(next_seq_num);
             }
-            num_packets_sent++;
-
-            printPacket(data, false); // send last data
-
-            int last_seq_num = SequenceNumbers.get(SequenceNumbers.size() - 1);
-
-            if (last_seq_num == next_seq_num) {
-                System.out.println("here");
-                isRetrasnmitting = false;
-            }
-
-            updateVarsSend(data, isData(data));
-            startTimer(next_seq_num);
         }
 
     }
@@ -587,13 +610,13 @@ public class SendHost {
     }
 
     private void startTimer(int seqNum) {
-        System.out.println("Start timer for" + seqNum + "\n");
+        // System.out.println("Start timer for" + seqNum + "\n");
         long timeoutTime = System.nanoTime() + timeout;
         Timer timer = new Timer();
         timer.schedule(new TimerTask() {
             @Override
             public void run() {
-                System.out.println("Timer went off");
+                isRetrasnmitting = true;
                 cancelTimer(seqNum); // remove the sequence number
                 resetState(seqNum);
 
@@ -605,7 +628,7 @@ public class SendHost {
     private void cancelTimer(int seqNum) { // TODO: cancel timer everytime there is an ack
         Timer timer = timers.get(seqNum);
         if (timer != null) {
-            System.out.println("Canceled timer for" + seqNum);
+            // System.out.println("Canceled timer for" + seqNum);
             timer.cancel();
             timers.remove(seqNum);
         }
@@ -640,27 +663,6 @@ public class SendHost {
 
     }
 
-    public void printSummary() {
-        // Amount of Data transferred/received
-        System.out.println("Amount of Data transferred/received: " + amountDataSent + " bytes");
-
-        // Number of packets sent/received
-        System.out.println("Number of packets sent: " + num_packets_sent);
-
-        // Number of out-of-sequence packets discarded
-        System.out.println("Number of out-of-sequence packets discarded: "); // TODO
-
-        // Number of packets discarded due to incorrect checksum
-        System.out.println("Number of packets discarded due to incorrect checksum: " + num_incorrect_checksums);
-
-        // Number of retransmissions
-        System.out.println("Number of retransmissions: " + totalRetransmissions);
-
-        // Number of duplicate acknowledgements
-        System.out.println("Number of duplicate acknowledgements: " + num_duplicate_acks);
-
-    }
-
     public class SendThread extends Thread {
 
         @Override
@@ -682,7 +684,6 @@ public class SendHost {
                     if (foundHost && !lastPacket) { // we have received a message from the host
 
                         if ((next_seq_num + dataSegmentSize < prev_ack + slidingWindowSize + 1) && !isRetrasnmitting) {
-                            System.out.println("Window is big enough");
 
                             synchronized (lock) {
 
@@ -804,7 +805,7 @@ public class SendHost {
             DatagramPacket packet = new DatagramPacket(data, mtu); // data now stores the packet
 
             while (!instantiateFIN) {
-                System.out.println("In reciveve");
+                // System.out.println("In reciveve");
 
                 try {
                     server_socket.receive(packet); // this will wait here
@@ -816,7 +817,7 @@ public class SendHost {
                 if (validateChecksum(data)) {
 
                     int ackNumber = pullAck(data); // this is 1
-                    prev_ack = ackNumber; 
+                    prev_ack = ackNumber;
 
                     // System.out.println("seq_num: " + pullSeqNum(data));
                     // int length = pullLength(data);
@@ -832,13 +833,18 @@ public class SendHost {
                         System.exit(-1);
                     }
                     synchronized (lock) {
-                        if (ackNumber != 1)
-                            DuplicateAcks.add(ackNumber);
+                        DuplicateAcks.add(ackNumber);
 
                         if (DuplicateAcks.size() == 5) {
                             DuplicateAcks.remove(0);
                         }
-                        System.out.println("DuplicateAcks array contents: " + DuplicateAcks);
+                        int size = DuplicateAcks.size();
+
+                        if (DuplicateAcks.size() > 1
+                                && (DuplicateAcks.get(size - 1).equals(DuplicateAcks.get(size - 2)))) {
+                            num_duplicate_acks++;
+                        }
+                        // System.out.println("DuplicateAcks array contents: " + DuplicateAcks);
 
                         if (DuplicateAcks.size() == 4 && allElementsEqual(DuplicateAcks)) {
                             isRetrasnmitting = true;
@@ -868,6 +874,9 @@ public class SendHost {
                                     curr_seq_num += 1;
 
                                 }
+                                if (isFIN(data)) {
+                                    instantiateFIN = true;
+                                }
 
                                 // now we need to send a packet back that we recived the data
                                 // flags = 1 means the ACK flag is set
@@ -889,11 +898,11 @@ public class SendHost {
                                     System.exit(-1);
                                 }
                                 printPacket(ackToSend, false);
-                                // TODO: have to make sure retransmitted packets do not get timeout set
 
                             } else {
 
-                                if (lastPacket) {
+                                if (lastPacket && !hasSentLastPacket) {
+                                    hasSentLastPacket = true;
                                     // need to send a FIN packet to the server
                                     byte[] finData = buildPacket(new byte[0], 2, next_seq_num); // TODO: check this
                                     // System.out.println("seq_num: " + finData);
@@ -930,7 +939,7 @@ public class SendHost {
                     // checksum was not valid
                     num_incorrect_checksums++;
                 }
-                System.out.println("Out of recieve");
+                // System.out.println("Out of recieve");
             }
         }
 

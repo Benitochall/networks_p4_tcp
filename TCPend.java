@@ -1,13 +1,24 @@
-
-/*
- * This class will set up our program to run the sending host and the receiving host
- */
-
-import java.util.*; 
-import java.io.*; 
-
+import java.util.*;
+import java.io.*;
 
 public class TCPend {
+
+    public static void printSummary(int amountDataSent, int num_packets_sent, int num_out_of_seq,
+            int num_incorrect_checksums, int totalRetransmissions, int num_duplicate_acks) {
+
+        System.out.println("Amount of Data transferred/received: " + amountDataSent + " bytes");
+
+        System.out.println("Number of packets sent: " + num_packets_sent);
+
+        System.out.println("Number of out-of-sequence packets discarded: " + num_out_of_seq);
+
+        System.out.println("Number of packets discarded due to incorrect checksum: " + num_incorrect_checksums);
+
+        System.out.println("Number of retransmissions: " + totalRetransmissions);
+
+        System.out.println("Number of duplicate acknowledgements: " + num_duplicate_acks);
+
+    }
 
     public static void main(String[] args) {
 
@@ -30,7 +41,7 @@ public class TCPend {
                 if (args[i].equals("-p")) {
                     // this is how we determine the port number
                     port = Integer.parseInt(args[++i]);
-                    if (port < 0){
+                    if (port < 0) {
                         System.out.println("Invalid port number");
                         return;
                     }
@@ -41,7 +52,7 @@ public class TCPend {
                 } else if (args[i].equals("-a")) {
 
                     remote_port = Integer.parseInt(args[++i]);
-                    if (remote_port < 0){
+                    if (remote_port < 0) {
                         System.out.println("Invalid port number");
                         return;
                     }
@@ -66,7 +77,12 @@ public class TCPend {
 
             }
             SendHost send_host = new SendHost(port, remote_ip, remote_port, file_name, mtu, sws);
-            System.out.println("Args " + port + " " + remote_ip + " " + file_name + " " + remote_ip + " " + mtu + " " + sws); 
+            System.out.println("Sender Stats:"); 
+            printSummary(send_host.getDataTransfered(), send_host.getNumPacketsSent(),
+                    0,
+                    send_host.getIncorrectChecksums(),
+                    send_host.getRetransmissions(), send_host.getDuplicateAcks());
+            System.exit(0);
         }
         // java TCPend -p <port> -m <mtu> -c <sws> -f <file name>
         else if (args.length == 8) {
@@ -75,10 +91,10 @@ public class TCPend {
                 if (args[i].equals("-p")) {
                     // this is how we determine the port number
                     port = Integer.parseInt(args[++i]);
-                    if (port < 0 ){
+                    if (port < 0) {
                         System.out.println("Invalid port number");
                         System.out.println(port);
-                        return; 
+                        return;
                     }
 
                 } else if (args[i].equals("-m")) {
@@ -98,15 +114,13 @@ public class TCPend {
             }
             // invoke the receiverhost
             ReceiverHost receiver_host = new ReceiverHost(port, mtu, sws, file_path_name);
-            System.out.println("Args " + port +" " + mtu + " " + sws + " " + file_path_name); 
 
-        }
-        else {
+        } else {
             System.out.println(
-                "Sender Usage: java TCPend -p <port> -s <remote IP> -a <remote port> -f <file name> -m <mtu> -c <sws>");
-            
+                    "Sender Usage: java TCPend -p <port> -s <remote IP> -a <remote port> -f <file name> -m <mtu> -c <sws>");
+
             System.out.println(
-                "Receiver Usage: java TCPend -p <port> -s <remote IP> -a <remote port> -f <file name> -m <mtu> -c <sws>");
+                    "Receiver Usage: java TCPend -p <port> -s <remote IP> -a <remote port> -f <file name> -m <mtu> -c <sws>");
 
         }
 
