@@ -152,6 +152,7 @@ public class ReceiverHost {
                                     }
                                 }
                                 ooo = false;
+                                recBuffer.clear();
                             }
                         }
                     }
