@@ -2,6 +2,8 @@ import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.net.*;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 
 public class ReceiverHost {
@@ -20,7 +22,7 @@ public class ReceiverHost {
     private boolean finished_receiving;
     private boolean connected;
     private boolean endOfConnection;
-
+    private boolean ooo;
     private boolean temp;
 
     private DatagramSocket receive_socket;
@@ -28,7 +30,11 @@ public class ReceiverHost {
     private HashMap<Integer, byte[]> recBuffer;
 
     private int dataReceived;
-    private int oooPacketCount;
+    private int packetsReceived;
+    private int oooPacketsDiscarded;
+    private int oooPacketsChecksumDiscarded;
+    private int numRetransmissions;
+    private int numDupAcks;
 
 
     public ReceiverHost(int port, int mtu, int sws, String fileName){
@@ -43,7 +49,15 @@ public class ReceiverHost {
         finished_receiving = false;
         connected = false;
         endOfConnection = false;
+        ooo = false;
         temp = true;
+
+        dataReceived = 0;
+        packetsReceived = 0;
+        oooPacketsDiscarded = 0;
+        oooPacketsChecksumDiscarded = 0;
+        numRetransmissions = 0;
+        numDupAcks = 0;
 
         startTime = System.nanoTime();
 
@@ -83,6 +97,9 @@ public class ReceiverHost {
                 System.out.println("Could not receive incoming packet :(");
             }
 
+            packetsReceived++;
+            dataReceived += incomingData.length;
+
             int dstPort = incomingPacket.getPort();
             InetAddress dstAddr = incomingPacket.getAddress();
 
@@ -98,21 +115,43 @@ public class ReceiverHost {
                     // packet has data
                     // exclude flags from length check
                     if(actualLength > 0){
-                        next_ack_num = pullSeqNum(incomingData) + actualLength;
+                        // runs if packets have been received in order
+                        if(!ooo){
+                            next_ack_num = pullSeqNum(incomingData) + actualLength;
 
-                        if(connected){
-                            if(next_ack_num + payload_size < next_base_ack + sws && length == payload_size){
-                                continue;
-                            }
-                            else{
-                                sendPacket(dstPort, dstAddr, sentTime, ACK, curr_seq_num);
-
-                                try {
-                                    fileWriter.write(pullData(incomingData));
-                                } catch (Exception e) {
-                                    System.out.println("Failed writing to file");
-                                    System.exit(-1);
+                            if(connected){
+                                if(next_ack_num + payload_size < next_base_ack + sws && length == payload_size){
+                                    continue;
                                 }
+                                else{
+                                    sendPacket(dstPort, dstAddr, sentTime, ACK, curr_seq_num);
+
+                                    try {
+                                        fileWriter.write(pullData(incomingData));
+                                    } catch (Exception e) {
+                                        System.out.println("Failed writing to file");
+                                        System.exit(-1);
+                                    }
+                                }
+                            }
+                        }
+                        // packets are out of order, need to store in buffer until missing packet is received
+                        else{
+                            recBuffer.put(pullSeqNum(incomingData), incomingData);
+                            // packet received is the missing/ooo packet
+                            // idk if the if-check is correct here
+                            if(pullSeqNum(incomingData) == next_ack_num){
+                                ArrayList<Integer> keys = new ArrayList<>(recBuffer.keySet());
+                                Collections.sort(keys);
+                                for(Integer i : keys){
+                                    try {
+                                        fileWriter.write(pullData(recBuffer.get(i)));
+                                    } catch (Exception e) {
+                                        System.out.println("Failed writing to file");
+                                        System.exit(-1);
+                                    }
+                                }
+                                ooo = false;
                             }
                         }
                     }
@@ -146,14 +185,21 @@ public class ReceiverHost {
             }
             // send duplicate ack, packets not in order
             else{
+                ooo = true;
+
                 // need to store the received packet in the receiver buffer
                 // and ack the last successful byte received
                 if(recBuffer.size() + 1 <= sws){
-                    recBuffer.put(curr_seq_num, incomingData);
+                    recBuffer.put(pullSeqNum(incomingData), incomingData);
+                }else{
+                    // packet gets dropped
+                    oooPacketsDiscarded++;
                 }
 
                 // not sure if the sequence num is correct here
+                // duplicate ACK sent
                 sendPacket(dstPort, dstAddr, sentTime, ACK, prev_ack_num);
+                numDupAcks++;
             }
         }
 
@@ -475,4 +521,27 @@ public class ReceiverHost {
         return (short) (~sum & 0xFFFF);
     }
 
+    private int getDataReceived(){
+        return dataReceived;
+    }
+
+    private int getPacketsReceived(){
+        return packetsReceived;
+    }
+
+    private int getOooPacketsDiscarded(){
+        return oooPacketsDiscarded;
+    }
+
+    private int getOooPacketsChecksumDiscarded(){
+        return oooPacketsChecksumDiscarded;
+    }
+
+    private int getNumRetransmissions(){
+        return numRetransmissions;
+    }
+
+    private int getNumDupAcks(){
+        return numDupAcks;
+    }
 }
