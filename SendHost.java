@@ -183,10 +183,10 @@ public class SendHost {
         if (dupackcountlist.containsKey(seqnum)) {
             int count = dupackcountlist.get(seqnum);
             count++;
-            // if (count == 16) {
-            //     System.out.println("Too many retransmitts. Exiting program");
-            //     System.exit(-1);
-            // }
+            if (count == 16) {
+                System.out.println("Too many retransmitts. Exiting program");
+                System.exit(-1);
+            }
             dupackcountlist.put(seqnum, count);
         } else {
             dupackcountlist.put(seqnum, 1);
@@ -500,6 +500,7 @@ public class SendHost {
         // need to get the packet
 
         next_seq_num = next_seq_num - (mtu-24); 
+        incrementDupackCount(next_seq_num);
        
 
         synchronized (lock) {
@@ -508,7 +509,6 @@ public class SendHost {
                 if (next_seq_num + dataSegmentSize < prev_ack + slidingWindowSize + 1) {
 
                     num_retransmissions++;
-                    incrementDupackCount(next_seq_num);
 
                     byte[] data = packets.get(next_seq_num); // this is 977
                     // now cancel the timer on this packet
