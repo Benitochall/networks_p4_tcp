@@ -3,7 +3,6 @@ import java.io.FileOutputStream;
 import java.net.*;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 
 public class ReceiverHost {
@@ -22,7 +21,9 @@ public class ReceiverHost {
     private boolean finished_receiving;
     private boolean connected;
     private boolean endOfConnection;
-    private boolean ooo;
+
+    private ArrayList<byte[]> uniqPackets;
+
     private boolean temp;
 
     private DatagramSocket receive_socket;
@@ -30,14 +31,9 @@ public class ReceiverHost {
     private HashMap<Integer, byte[]> recBuffer;
 
     private int dataReceived;
-    private int packetsReceived;
-    private int oooPacketsDiscarded;
-    private int oooPacketsChecksumDiscarded;
-    private int numRetransmissions;
-    private int numDupAcks;
+    private int oooPacketCount;
 
-
-    public ReceiverHost(int port, int mtu, int sws, String fileName){
+    public ReceiverHost(int port, int mtu, int sws, String fileName) {
 
         curr_seq_num = 0;
         next_seq_num = 0;
@@ -49,30 +45,22 @@ public class ReceiverHost {
         finished_receiving = false;
         connected = false;
         endOfConnection = false;
-        ooo = false;
         temp = true;
-
-        dataReceived = 0;
-        packetsReceived = 0;
-        oooPacketsDiscarded = 0;
-        oooPacketsChecksumDiscarded = 0;
-        numRetransmissions = 0;
-        numDupAcks = 0;
 
         startTime = System.nanoTime();
 
         recBuffer = new HashMap<>();
 
-        while(temp){
+        while (temp) {
             runReceiver(port, mtu, sws, fileName);
             resetConnection();
         }
     }
 
-    private void runReceiver(int port, int mtu, int sws, String fileName){
+    private void runReceiver(int port, int mtu, int sws, String fileName) {
         try {
             receive_socket = new DatagramSocket(port);
-        }catch(Exception e){
+        } catch (Exception e) {
             System.out.println("Failed to create socket");
             System.exit(-1);
         }
@@ -90,15 +78,12 @@ public class ReceiverHost {
 
         assert fileWriter != null;
 
-        while(!finished_receiving){
+        while (!finished_receiving) {
             try {
                 receive_socket.receive(incomingPacket);
-            }catch(Exception e){
+            } catch (Exception e) {
                 System.out.println("Could not receive incoming packet :(");
             }
-
-            packetsReceived++;
-            dataReceived += incomingData.length;
 
             int dstPort = incomingPacket.getPort();
             InetAddress dstAddr = incomingPacket.getAddress();
@@ -107,63 +92,56 @@ public class ReceiverHost {
             int actualLength = length >> 3;
             long sentTime = pullTime(incomingData);
 
-            if(verifyAck(incomingData) != -1){
+            if (verifyAck(incomingData) != -1) {
                 printPacket(incomingData, true);
                 receiveUpdate(incomingData);
 
-                if(isSynFinData(incomingData)){
+                if (isSynFinData(incomingData)) {
                     // packet has data
                     // exclude flags from length check
-                    if(actualLength > 0){
-                        // runs if packets have been received in order
-                        if(!ooo){
-                            next_ack_num = pullSeqNum(incomingData) + actualLength;
+                    if (actualLength > 0) {
 
-                            if(connected){
-                                if(next_ack_num + payload_size < next_base_ack + sws && length == payload_size){
-                                    continue;
+                        next_ack_num = pullSeqNum(incomingData) + actualLength;
+
+                        if (connected) {
+                            if (next_ack_num + payload_size < next_base_ack + sws && length == payload_size) {
+                                continue;
+                            } else {
+                                sendPacket(dstPort, dstAddr, sentTime, ACK, curr_seq_num);
+
+                                // need to check if we have already wirtten this packet last 30 should be good
+                                if (uniqPackets.size() >= 30){
+                                    uniqPackets.remove(0); 
+
                                 }
-                                else{
-                                    sendPacket(dstPort, dstAddr, sentTime, ACK, curr_seq_num);
-
+                                // need to get the data section of packets
+                                int startIndex = 24;
+                                int endIndex = actualLength;
+                                byte[] sectionBytes = new byte[endIndex - startIndex + 1];
+                                System.arraycopy(incomingData, startIndex, sectionBytes, 0, sectionBytes.length);
+                                
+                                if (!uniqPackets.contains(sectionBytes)){
+                                    uniqPackets.add(sectionBytes); 
+                                    dataReceived+= actualLength; 
                                     try {
                                         fileWriter.write(pullData(incomingData));
                                     } catch (Exception e) {
                                         System.out.println("Failed writing to file");
                                         System.exit(-1);
                                     }
+
                                 }
-                            }
-                        }
-                        // packets are out of order, need to store in buffer until missing packet is received
-                        else{
-                            recBuffer.put(pullSeqNum(incomingData), incomingData);
-                            // packet received is the missing/ooo packet
-                            // idk if the if-check is correct here
-                            if(pullSeqNum(incomingData) == next_ack_num){
-                                ArrayList<Integer> keys = new ArrayList<>(recBuffer.keySet());
-                                Collections.sort(keys);
-                                for(Integer i : keys){
-                                    try {
-                                        fileWriter.write(pullData(recBuffer.get(i)));
-                                    } catch (Exception e) {
-                                        System.out.println("Failed writing to file");
-                                        System.exit(-1);
-                                    }
-                                }
-                                ooo = false;
-                                recBuffer.clear();
                             }
                         }
                     }
                     // packet doesn't have data, SYN/FIN received
-                    else{
+                    else {
                         next_ack_num = pullSeqNum(incomingData) + 1;
 
-                        if(isFlagSet(length, SYN)){
+                        if (isFlagSet(length, SYN)) {
                             // respond to SYN from sender
                             sendPacket(dstPort, dstAddr, sentTime, ACK + SYN, next_seq_num);
-                        }else{
+                        } else {
                             // respond to FIN from sender
                             sendPacket(dstPort, dstAddr, sentTime, ACK + FIN, next_seq_num);
                             endOfConnection = true;
@@ -171,43 +149,35 @@ public class ReceiverHost {
                     }
                 }
                 // received an ACK
-                else{
-                    if(next_seq_num == 1){
+                else {
+                    if (next_seq_num == 1) {
                         connected = true;
                     }
 
-                    if(endOfConnection){
+                    if (endOfConnection) {
                         // close connection, final ack received
-                        if(next_seq_num == pullAck(incomingData)){
+                        if (next_seq_num == pullAck(incomingData)) {
                             finished_receiving = true;
                         }
                     }
                 }
             }
             // send duplicate ack, packets not in order
-            else{
-                ooo = true;
-
+            else {
                 // need to store the received packet in the receiver buffer
                 // and ack the last successful byte received
-                if(recBuffer.size() + 1 <= sws){
-                    recBuffer.put(pullSeqNum(incomingData), incomingData);
-                }else{
-                    // packet gets dropped
-                    oooPacketsDiscarded++;
+                if (recBuffer.size() + 1 <= sws) {
+                    recBuffer.put(curr_seq_num, incomingData);
                 }
 
                 // not sure if the sequence num is correct here
-                // duplicate ACK sent
                 sendPacket(dstPort, dstAddr, sentTime, ACK, prev_ack_num);
-                numDupAcks++;
             }
         }
 
-
     }
 
-    private void resetConnection(){
+    private void resetConnection() {
         curr_seq_num = 0;
         next_seq_num = 0;
         prev_ack_num = -1;
@@ -221,11 +191,29 @@ public class ReceiverHost {
 
         try {
             receive_socket.send(new DatagramPacket(packet, packet.length, dstAddr, dstPort));
-        }catch(Exception e){
-            System.out.println("Failed to send ack packet");
+        } catch (Exception e) {
+            printSummary(dataReceived, ,0,0); // Raul finish this method 
+
             System.exit(-1);
         }
         sendUpdate(packet);
+    }
+
+    public void printSummary(int amountDataSent, int num_packets_sent, int num_out_of_seq,
+            int num_incorrect_checksums, int totalRetransmissions, int num_duplicate_acks) {
+
+        System.out.println("Amount of Data transferred/received: " + amountDataSent + " bytes");
+
+        System.out.println("Number of packets sent: " + num_packets_sent);
+
+        System.out.println("Number of out-of-sequence packets discarded: " + num_out_of_seq);
+
+        System.out.println("Number of packets discarded due to incorrect checksum: " + num_incorrect_checksums);
+
+        System.out.println("Number of retransmissions: " + totalRetransmissions);
+
+        System.out.println("Number of duplicate acknowledgements: " + num_duplicate_acks);
+
     }
 
     private boolean isSynFinData(byte[] packet) {
@@ -244,29 +232,29 @@ public class ReceiverHost {
         }
     }
 
-    private boolean isFlagSet(int length, int flag){
+    private boolean isFlagSet(int length, int flag) {
         // flag var values: SYN = 4, FIN = 2, ACK = 1
 
-        if(flag == SYN){
+        if (flag == SYN) {
             return (length >> 2 & 1) == 1;
-        }else if(flag == FIN){
+        } else if (flag == FIN) {
             return (length >> 1 & 1) == 1;
-        }else if(flag == ACK){
+        } else if (flag == ACK) {
             return (length & 1) == 1;
         }
 
         return false;
     }
 
-    private int verifyAck(byte[] packet){
+    private int verifyAck(byte[] packet) {
         int ackNum = pullAck(packet);
-        if(ackNum != next_seq_num){
+        if (ackNum != next_seq_num) {
             return -1;
         }
 
-        if(isSynFinData(packet)){
+        if (isSynFinData(packet)) {
             int seqNum = pullSeqNum(packet);
-            if(seqNum != next_ack_num){
+            if (seqNum != next_ack_num) {
                 return -1;
             }
         }
@@ -274,34 +262,32 @@ public class ReceiverHost {
         return ackNum;
     }
 
-    private void receiveUpdate(byte[] packet){
+    private void receiveUpdate(byte[] packet) {
         int length = pullLength(packet);
 
-        if(isSynFinData(packet)) {
+        if (isSynFinData(packet)) {
             // exclude flags from length check
-            if((length >> 3) > 0){
+            if ((length >> 3) > 0) {
                 next_ack_num = pullSeqNum(packet) + (length >> 3);
-            }
-            else{
+            } else {
                 next_ack_num = pullSeqNum(packet) + 1;
             }
         }
 
-        if(isFlagSet(length, ACK)){
+        if (isFlagSet(length, ACK)) {
             prev_ack_num = pullAck(packet) - 1;
         }
     }
 
-    private void sendUpdate(byte[] packet){
+    private void sendUpdate(byte[] packet) {
         int length = pullLength(packet);
 
-        if(isSynFinData(packet)){
+        if (isSynFinData(packet)) {
             curr_seq_num = next_seq_num;
             // exclude flags from length check
-            if((length >> 3) > 0){
+            if ((length >> 3) > 0) {
                 next_seq_num = curr_seq_num + (length >> 3);
-            }
-            else{
+            } else {
                 next_seq_num = curr_seq_num + 1;
             }
 
@@ -349,7 +335,7 @@ public class ReceiverHost {
         return temp;
     }
 
-    private void printPacket(byte[] packet, boolean receive){
+    private void printPacket(byte[] packet, boolean receive) {
         StringBuilder sb = new StringBuilder();
         if (receive) {
             sb.append("rcv");
@@ -430,9 +416,9 @@ public class ReceiverHost {
 
         boolean isAck = isFlagSet(flags, ACK);
 
-        if(isAck && timestamp == 0){
+        if (isAck && timestamp == 0) {
             buffer3.putLong(timestamp);
-        }else{
+        } else {
             long currTimeStamp = System.nanoTime();
             buffer3.putLong(currTimeStamp);
         }
@@ -522,27 +508,4 @@ public class ReceiverHost {
         return (short) (~sum & 0xFFFF);
     }
 
-    private int getDataReceived(){
-        return dataReceived;
-    }
-
-    private int getPacketsReceived(){
-        return packetsReceived;
-    }
-
-    private int getOooPacketsDiscarded(){
-        return oooPacketsDiscarded;
-    }
-
-    private int getOooPacketsChecksumDiscarded(){
-        return oooPacketsChecksumDiscarded;
-    }
-
-    private int getNumRetransmissions(){
-        return numRetransmissions;
-    }
-
-    private int getNumDupAcks(){
-        return numDupAcks;
-    }
 }
