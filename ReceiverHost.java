@@ -192,7 +192,7 @@ public class ReceiverHost {
         try {
             receive_socket.send(new DatagramPacket(packet, packet.length, dstAddr, dstPort));
         } catch (Exception e) {
-            printSummary(dataReceived, ,0,0); // Raul finish this method 
+            printSummary(dataReceived, ,0,0); // Raul finish this method with the data both the last two should be 0, packets sent should also be 0
 
             System.exit(-1);
         }
