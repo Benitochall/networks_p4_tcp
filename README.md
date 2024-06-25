@@ -33,7 +33,7 @@ Fast retransmit triggers upon receiving three duplicate ACKs, facilitating quick
 The `TCPend` class initializes either sender or receiver modes based on the following arguments:
 
 For sending mode:
-java TCPend -p <port> -s <remote IP> -a <remote port> -f <file name> -m <mtu> -c <sws>
+java TCPend -p `<port>` -s `<remote IP>` -a `<remote port>` -f `<file name>` -m `<mtu>` -c `<sws>`
 - `port`: Port number of the client
 - `remote IP`: IP address of the remote peer
 - `remote port`: Port of the remote receiver
@@ -42,7 +42,7 @@ java TCPend -p <port> -s <remote IP> -a <remote port> -f <file name> -m <mtu> -c
 - `sws`: Sliding window size in segments
 
 For receiving mode:
-java TCPend -p <port> -f <file name> -m <mtu> -c <sws>
+java TCPend -p `<port>` -f `<file name>` -m `<mtu>` -c `<sws>`
 - `port`: Port number where the receiver listens
 - `file name`: Path to save the incoming file
 - `mtu`: Maximum transmission unit in bytes
